@@ -72,6 +72,14 @@ module insolation
         module procedure calc_insol_days_2D
     end interface
 
+    ! Insolation while the sun is above a minimum elevation angle. Resolved on
+    ! the rank of `insol` in the same way as calc_insol_day.
+    interface calc_insol_above
+        module procedure calc_insol_above_1D
+        module procedure calc_insol_above_2D
+        module procedure calc_insol_above_pt
+    end interface
+
     ! Insolation averaged over a range of days (eg. a season or the year).
     interface calc_insol_ave
         module procedure calc_insol_ave_1D
@@ -88,6 +96,7 @@ module insolation
     public :: calc_insol_day
     public :: calc_insol_days
     public :: calc_insol_ave
+    public :: calc_insol_above
 
 contains
 
@@ -384,6 +393,227 @@ contains
         return
 
     end subroutine calc_insol_ave_2D
+
+! =====================================================================================================
+! Insolation while the sun is above a minimum elevation
+
+    subroutine calc_insol_above_pt(is,insol,tday,coszm,day,lat,time_bp,elev_min)
+        ! Insolation at one latitude, restricted to the part of the day when the
+        ! sun stands higher than `elev_min` above the horizon.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol     ! Mean flux while above elev_min [W/m2]
+        real(wp),          intent(OUT) :: tday      ! Fraction of the day above elev_min
+        real(wp),          intent(OUT) :: coszm     ! Flux-weighted mean cos(zenith)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: lat
+        real(dp),          intent(IN)  :: time_bp
+        real(dp),          intent(IN)  :: elev_min  ! [degrees above the horizon]
+
+        ! Local variables
+        real(dp) :: decl, dist2, latrad
+        real(wp) :: insol1(1), tday1(1), coszm1(1)
+
+        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+
+        latrad = lat*deg_to_rad
+
+        call calc_insol_above_kernel(insol1,tday1,coszm1,[sin(latrad)],[cos(latrad)], &
+                                     [elev_min],decl,dist2,is%S0)
+
+        insol = insol1(1)
+        tday  = tday1(1)
+        coszm = coszm1(1)
+
+        return
+
+    end subroutine calc_insol_above_pt
+
+    subroutine calc_insol_above_1D(is,insol,tday,coszm,day,time_bp,elev_min)
+        ! As calc_insol_above_pt, over the 1D latitude grid held in `is`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:)
+        real(wp),          intent(OUT) :: tday(:)
+        real(wp),          intent(OUT) :: coszm(:)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+        real(dp),          intent(IN)  :: elev_min(:)   ! One threshold per grid point
+
+        ! Local variables
+        real(dp) :: decl, dist2
+
+        call check_grid(is,size(insol),1,"calc_insol_above")
+        call check_elev_min(size(elev_min),is%n_lat,"calc_insol_above")
+
+        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+
+        call calc_insol_above_kernel(insol,tday,coszm,is%sinlat,is%coslat, &
+                                     elev_min,decl,dist2,is%S0)
+
+        return
+
+    end subroutine calc_insol_above_1D
+
+    subroutine calc_insol_above_2D(is,insol,tday,coszm,day,time_bp,elev_min)
+        ! As calc_insol_above_pt, over the 2D latitude grid held in `is`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)
+        real(wp),          intent(OUT) :: tday(:,:)
+        real(wp),          intent(OUT) :: coszm(:,:)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+        real(dp),          intent(IN)  :: elev_min(:,:)
+
+        ! Local variables
+        real(dp) :: decl, dist2
+        real(wp) :: insol1D(is%n_lat), tday1D(is%n_lat), coszm1D(is%n_lat)
+
+        call check_grid(is,size(insol),2,"calc_insol_above")
+        call check_elev_min(size(elev_min),is%n_lat,"calc_insol_above")
+
+        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+
+        call calc_insol_above_kernel(insol1D,tday1D,coszm1D,is%sinlat,is%coslat, &
+                                     reshape(elev_min,[is%n_lat]),decl,dist2,is%S0)
+
+        insol = reshape(insol1D,[is%n1,is%n2])
+        tday  = reshape(tday1D, [is%n1,is%n2])
+        coszm = reshape(coszm1D,[is%n1,is%n2])
+
+        return
+
+    end subroutine calc_insol_above_2D
+
+    subroutine calc_insol_above_kernel(insol,tday,coszm,sinlat,coslat,elev_min, &
+                                       decl,dist2,S0)
+        ! Insolation over the part of the day when the solar elevation exceeds
+        ! elev_min, in closed form.
+        !
+        ! Written for melt schemes that resolve the diurnal cycle: dEBM
+        ! (Krebs-Kanzow et al., 2018) melts only while the sun is above a
+        ! critical elevation Phi, estimated locally, which is why the threshold
+        ! is taken per grid point rather than as a scalar.
+        !
+        ! With cos(z) = a + b cos(h), a = sin(lat)sin(dec), b = cos(lat)cos(dec),
+        ! the sun is above elevation Phi for |h| < h_phi where
+        !
+        !     cos(h_phi) = (sin(Phi) - a)/b
+        !
+        ! and the integrals over that window are
+        !
+        !     I1 = int cos(z)   dh = 2( a h_phi + b sin(h_phi) )
+        !     I2 = int cos(z)^2 dh = 2( (a^2 + b^2/2) h_phi + 2ab sin(h_phi)
+        !                               + (b^2/4) sin(2 h_phi) )
+        !
+        ! giving the mean flux over the window as S0 (a/r)^2 I1/(2 h_phi), the
+        ! fraction of the day as h_phi/pi, and the flux-weighted mean cosine of
+        ! the zenith angle -- the quantity that sets the effective air mass for
+        ! the energy actually received -- as I2/I1.
+        !
+        ! elev_min = 0 recovers sunrise-to-sunset, for which insol*tday equals
+        ! the daily mean returned by calc_insol_day.
+
+        implicit none
+
+        real(wp), intent(OUT) :: insol(:)
+        real(wp), intent(OUT) :: tday(:)
+        real(wp), intent(OUT) :: coszm(:)
+        real(dp), intent(IN), contiguous :: sinlat(:)
+        real(dp), intent(IN), contiguous :: coslat(:)
+        real(dp), intent(IN) :: elev_min(:)
+        real(dp), intent(IN) :: decl, dist2, S0
+
+        ! Local variables
+        integer  :: j
+        real(dp) :: sindec, cosdec, flux
+        real(dp) :: a, b, sin_phi, cos_h, h, sin_h, i1, i2
+
+        sindec = sin(decl)
+        cosdec = cos(decl)
+        flux   = S0*dist2
+
+        do j = 1, size(sinlat)
+
+            a = sinlat(j)*sindec
+            b = coslat(j)*cosdec
+
+            sin_phi = sin(elev_min(j)*deg_to_rad)
+
+            ! At the poles b vanishes and the elevation does not vary through the
+            ! day: the sun is either above the threshold for the whole day or not
+            ! at all.
+            if (abs(b) .lt. 1.0e-14_dp) then
+                if (a .gt. sin_phi) then
+                    cos_h = -1.0_dp
+                else
+                    cos_h =  1.0_dp
+                end if
+            else
+                cos_h = (sin_phi-a)/b
+            end if
+
+            if (cos_h .ge. 1.0_dp) then
+                h     = 0.0_dp              ! Never rises above elev_min
+                sin_h = 0.0_dp
+            else if (cos_h .le. -1.0_dp) then
+                h     = pi                  ! Above elev_min all day
+                sin_h = 0.0_dp
+            else
+                h     = acos(cos_h)
+                sin_h = sqrt(1.0_dp-cos_h*cos_h)
+            end if
+
+            tday(j) = real(h/pi,wp)
+
+            if (h .le. 0.0_dp) then
+                insol(j) = 0.0_wp
+                coszm(j) = 0.0_wp
+                cycle
+            end if
+
+            i1 = 2.0_dp*(a*h + b*sin_h)
+            i2 = 2.0_dp*((a*a + 0.5_dp*b*b)*h + 2.0_dp*a*b*sin_h &
+                         + 0.25_dp*b*b*sin(2.0_dp*h))
+
+            if (i1 .le. 0.0_dp) then
+                insol(j) = 0.0_wp
+                coszm(j) = 0.0_wp
+            else
+                insol(j) = real(flux*i1/(2.0_dp*h),wp)
+                coszm(j) = real(i2/i1,wp)
+            end if
+
+        end do
+
+        return
+
+    end subroutine calc_insol_above_kernel
+
+    subroutine check_elev_min(n_given,n_lat,routine)
+
+        implicit none
+
+        integer,          intent(IN) :: n_given, n_lat
+        character(len=*), intent(IN) :: routine
+
+        if (n_given /= n_lat) then
+            write(*,*) trim(routine)//":: Error: elev_min does not match the grid."
+            write(*,*) "grid points:    ", n_lat
+            write(*,*) "elev_min size:  ", n_given
+            error stop 1
+        end if
+
+        return
+
+    end subroutine check_elev_min
 
 ! =====================================================================================================
 ! Internal helpers

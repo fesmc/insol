@@ -53,6 +53,7 @@ program test_insol
     call test_reference_values()
     call test_equinox_convention()
     call test_interface_consistency()
+    call test_insol_above()
     call test_non_negative()
     call test_polar_night()
     call test_energy_balance()
@@ -258,6 +259,104 @@ contains
 
     end subroutine test_interface_consistency
 
+    subroutine test_insol_above()
+        ! calc_insol_above restricts the daily integral to the part of the day
+        ! when the sun is higher than a given elevation -- what dEBM
+        ! (Krebs-Kanzow et al., 2018) needs to resolve the diurnal melt cycle.
+        !
+        ! Three things must hold. With a threshold of zero it has to reduce to
+        ! sunrise-to-sunset, so insol*tday is the plain daily mean and coszm is
+        ! the all-day flux-weighted mean cosine, which the reference file already
+        ! carries. Raising the threshold can only shorten the day. And the
+        ! geometry must survive the poles, where the elevation is constant.
+
+        implicit none
+
+        character(len=512) :: line
+        real(dp) :: time_bp, lat, insol_ref, coszm_ref
+        real(wp) :: insol, tday, coszm, insol_plain
+        real(dp) :: err_daily, err_coszm, err
+        real(dp) :: tday_lo, tday_hi
+        real(wp) :: insol_hi, coszm_hi, tday_hi_wp
+        integer  :: ilat
+        integer  :: day, day_year, io, n, unit
+        type(insol_class) :: isl
+
+        ! --- threshold of zero reproduces the plain daily mean and the
+        !     reference mean cosine, over every point in the reference table ---
+        err_daily = 0.0_dp
+        err_coszm = 0.0_dp
+        n = 0
+
+        open(newunit=unit,file=ref_file,status="old",iostat=io)
+        if (io /= 0) then
+            call fail("insol_above vs reference", "cannot open "//ref_file)
+            return
+        end if
+
+        do
+            read(unit,'(a)',iostat=io) line
+            if (io /= 0) exit
+            if (len_trim(line) == 0) cycle
+            if (line(1:1) == '#') cycle
+
+            read(line,*) time_bp, day_year, lat, day, insol_ref, coszm_ref
+
+            if (day_year == 365) then
+                call calc_insol_above(is365,insol,tday,coszm,day,lat,time_bp,0.0_dp)
+                call calc_insol_day(is365,insol_plain,day,lat,time_bp)
+            else
+                call calc_insol_above(is,insol,tday,coszm,day,lat,time_bp,0.0_dp)
+                call calc_insol_day(is,insol_plain,day,lat,time_bp)
+            end if
+
+            err_daily = max(err_daily, abs(real(insol,dp)*real(tday,dp) - real(insol_plain,dp)))
+            err_coszm = max(err_coszm, abs(real(coszm,dp) - coszm_ref))
+            n = n + 1
+        end do
+
+        close(unit)
+
+        call check("insol_above: elev_min=0 gives the daily mean", err_daily, tol_ref, &
+                   "max |insol*tday - calc_insol_day| [W/m2]")
+        call check("insol_above: mean cos(zenith) vs reference", err_coszm, tol_ref, &
+                   "max |coszm - reference|")
+
+        ! --- raising the threshold shortens the day and cannot lengthen it ---
+        call insol_init(isl,fldr=fldr,S0=S0_ref)
+
+        err = 0.0_dp
+        do day = 1, 360, 11
+            do ilat = -80, 80, 20
+                lat = real(ilat,dp)
+                call calc_insol_above(isl,insol,   tday,      coszm,   day,lat,0.0_dp, 0.0_dp)
+                call calc_insol_above(isl,insol_hi,tday_hi_wp,coszm_hi,day,lat,0.0_dp,20.0_dp)
+                tday_lo = real(tday,dp)
+                tday_hi = real(tday_hi_wp,dp)
+                err = max(err, tday_hi - tday_lo)
+            end do
+        end do
+
+        call check("insol_above: higher threshold cannot lengthen the day", err, 0.0_dp, &
+                   "max increase in day fraction")
+
+        ! --- poles: the sun holds a constant elevation, so a threshold either
+        !     admits the whole day or none of it ---
+        call calc_insol_above(isl,insol,tday,coszm,172,90.0_dp,0.0_dp,10.0_dp)
+        call check_exact("insol_above: north pole, midsummer, 10 deg threshold", &
+                         real(tday,dp), 1.0_dp)
+
+        call calc_insol_above(isl,insol,tday,coszm,172,90.0_dp,0.0_dp,30.0_dp)
+        call check_exact("insol_above: north pole, midsummer, 30 deg threshold", &
+                         real(tday,dp), 0.0_dp)
+
+        call calc_insol_above(isl,insol,tday,coszm,355,90.0_dp,0.0_dp,0.0_dp)
+        call check_exact("insol_above: north pole, polar night", real(tday,dp), 0.0_dp)
+
+        call insol_end(isl)
+
+    end subroutine test_insol_above
+
     ! ------------------------------------------------------------------
     ! Suite 2: physical invariants
     ! ------------------------------------------------------------------
@@ -389,6 +488,21 @@ contains
         end if
 
     end subroutine check
+
+    subroutine check_exact(name, value, expected)
+
+        implicit none
+
+        character(len=*), intent(IN) :: name
+        real(dp),         intent(IN) :: value, expected
+
+        if (.not. (abs(value-expected) <= 1.0e-12_dp)) then
+            call fail(name, "got "//trim(rtoa(value))//", expected "//trim(rtoa(expected)))
+        else
+            call pass(name)
+        end if
+
+    end subroutine check_exact
 
     subroutine pass(name)
 
