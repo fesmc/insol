@@ -55,6 +55,8 @@ module insol_orbit
     public :: orbit_end
     public :: calc_orbital_par
     public :: calc_solar_geometry
+    public :: calc_solar_geometry_at
+    public :: calc_solar_position
 
 contains
 
@@ -96,12 +98,11 @@ contains
 
     subroutine calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
         ! Solar declination and the inverse-square distance factor (a/r)^2 for a
-        ! given day of the year.
+        ! given whole day of the year.
         !
-        ! Neither quantity depends on the time of day: ORBIT derives the
-        ! declination from the time of year alone, and the clock angle enters
-        ! only the zenith parameters PZEN2/PZEN3. It is therefore evaluated once
-        ! per day rather than once per hour, and reused for every latitude.
+        ! Neither quantity depends on the time of day, so the daily-mean
+        ! insolation evaluates this once per day and reuses it for every
+        ! latitude.
 
         implicit none
 
@@ -112,22 +113,149 @@ contains
         real(dp), intent(IN)  :: ECC, XOBCH, TPERI, ZAVEXPE
 
         ! Local variables
-        real(dp) :: PCLOCK, PYTIME
-        real(dp) :: PDISSE, PZEN1, PZEN2, PZEN3, PRAE
+        real(dp) :: eqtime
 
-        PYTIME = dble(day)/dble(day_max)*2.0_dp*pi
-        PCLOCK = 0.0_dp
-
-        call ORBIT(ECC,XOBCH,TPERI,ZAVEXPE, &
-                   PCLOCK,PYTIME,dble(day_max),PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
-
-        ! PZEN1 = sin(declination); PDISSE = (a/r)^2
-        decl  = asin(max(-1.0_dp,min(1.0_dp,PZEN1)))
-        dist2 = PDISSE
+        call calc_solar_geometry_at(decl,dist2,eqtime,real(day,dp),day_max, &
+                                    ECC,XOBCH,TPERI,ZAVEXPE)
 
         return
 
     end subroutine calc_solar_geometry
+
+    subroutine calc_solar_geometry_at(decl,dist2,eqtime,day_time,day_max, &
+                                      ECC,XOBCH,TPERI,ZAVEXPE)
+        ! Solar declination, distance factor and equation of time at an arbitrary
+        ! instant, given as elapsed days since 00:00 on 1 January.
+        !
+        ! Follows Monin (1986): solve Kepler's equation for the eccentric anomaly,
+        ! from which the true anomaly and hence the true solar longitude follow
+        ! exactly. Declination is then the projection of that longitude onto the
+        ! equator, tilted by the obliquity.
+        !
+        ! The equation of time -- apparent minus mean solar time -- comes from the
+        ! same solve: it is the difference between the mean sun's longitude and
+        ! the true sun's right ascension, so it captures both the eccentricity
+        ! and the obliquity contribution without a separate empirical series.
+        !
+        ! Replaces the ECMWF subroutine ORBIT (Geleyn 1982, and successive
+        ! revisions through Lorenz 1994), which computed the same declination and
+        ! distance but exposed neither the anomalies nor the equation of time.
+
+        implicit none
+
+        real(dp), intent(OUT) :: decl        ! Solar declination [radians]
+        real(dp), intent(OUT) :: dist2       ! (a/r)^2
+        real(dp), intent(OUT) :: eqtime      ! Equation of time [radians of hour angle]
+        real(dp), intent(IN)  :: day_time    ! Elapsed days since 1 Jan 00:00
+        integer,  intent(IN)  :: day_max     ! Days in the year
+        real(dp), intent(IN)  :: ECC         ! Eccentricity
+        real(dp), intent(IN)  :: XOBCH       ! Obliquity [degrees]
+        real(dp), intent(IN)  :: TPERI       ! Time of perihelion [days from year start]
+        real(dp), intent(IN)  :: ZAVEXPE     ! Longitude of perihelion from vernal equinox [radians]
+
+        ! Local variables
+        integer, parameter :: niter_max = 30
+        real(dp), parameter :: tol = 1.0e-12_dp
+
+        integer  :: niter
+        real(dp) :: ytime, mean_anom, ecc_anom, ecc_anom_new, de
+        real(dp) :: true_anom, lambda, obliq, mean_lon, right_asc
+
+        ytime = day_time/real(day_max,dp)*2.0_dp*pi
+
+        ! Mean anomaly: angle of a fictitious sun moving at constant rate,
+        ! measured from perihelion.
+        mean_anom = ytime - 2.0_dp*pi*TPERI/real(day_max,dp)
+
+        ! Solve Kepler's equation E - e sin(E) = M by Newton iteration.
+        ecc_anom = mean_anom
+        do niter = 1, niter_max
+            ecc_anom_new = (mean_anom + ECC*(sin(ecc_anom)-ecc_anom*cos(ecc_anom))) &
+                           / (1.0_dp - ECC*cos(ecc_anom))
+            de = ecc_anom_new - ecc_anom
+            ecc_anom = ecc_anom_new
+            if (abs(de) .lt. tol) exit
+        end do
+
+        if (niter .gt. niter_max) then
+            write(*,*) "calc_solar_geometry_at:: Error: eccentric anomaly did not converge."
+            write(*,*) "eccentricity: ", ECC
+            write(*,*) "mean anomaly: ", mean_anom
+            error stop 1
+        end if
+
+        ! Distance factor: the solar constant scales as (a/r)^2.
+        dist2 = (1.0_dp/(1.0_dp - ECC*cos(ecc_anom)))**2
+
+        ! True anomaly, then true longitude measured from the vernal equinox.
+        true_anom = 2.0_dp*atan(sqrt((1.0_dp+ECC)/(1.0_dp-ECC))*tan(ecc_anom/2.0_dp))
+        lambda    = true_anom + ZAVEXPE
+
+        obliq = XOBCH*deg_to_rad
+        decl  = asin(max(-1.0_dp,min(1.0_dp,sin(obliq)*sin(lambda))))
+
+        ! Equation of time. The mean sun advances uniformly along the equator;
+        ! the true sun's position on the equator is its right ascension, which
+        ! lags or leads because the orbit is eccentric and the ecliptic tilted.
+        mean_lon  = mean_anom + ZAVEXPE
+        right_asc = atan2(cos(obliq)*sin(lambda),cos(lambda))
+
+        eqtime = mean_lon - right_asc
+
+        ! Wrap into (-pi,pi]: the difference is at most a few degrees, so any
+        ! larger value is an accumulated multiple of a full turn.
+        eqtime = eqtime - 2.0_dp*pi*anint(eqtime/(2.0_dp*pi))
+
+        return
+
+    end subroutine calc_solar_geometry_at
+
+    subroutine calc_solar_position(orb,cosz,time_bp,day_time,lat,lon,decl,eqtime)
+        ! Cosine of the solar zenith angle at an instant and a location.
+        !
+        ! `day_time` is elapsed days since 00:00 UTC on 1 January, so 1.5 is
+        ! noon on 2 January. `lon` is degrees east. Negative values of cosz mean
+        ! the sun is below the horizon and are returned as given, so a caller can
+        ! distinguish night from a sun exactly on the horizon.
+
+        implicit none
+
+        type(orbit_class), intent(IN)  :: orb
+        real(dp),          intent(OUT) :: cosz
+        real(dp),          intent(IN)  :: time_bp     ! [yr] relative to 1950
+        real(dp),          intent(IN)  :: day_time    ! Elapsed days since 1 Jan 00:00 UTC
+        real(dp),          intent(IN)  :: lat         ! [degrees north]
+        real(dp),          intent(IN)  :: lon         ! [degrees east]
+        real(dp),          intent(OUT), optional :: decl
+        real(dp),          intent(OUT), optional :: eqtime
+
+        ! Local variables
+        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
+        real(dp) :: decl_now, dist2, eqtime_now
+        real(dp) :: hour_utc, solar_time, hour_angle
+        real(dp) :: latrad
+
+        call calc_orbital_par(orb,time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE)
+        call calc_solar_geometry_at(decl_now,dist2,eqtime_now,day_time,orb%day_year, &
+                                    ECC,XOBCH,TPERI,ZAVEXPE)
+
+        ! Hour angle: zero at local solar noon, advancing 2*pi per day. Mean
+        ! solar time at the meridian, corrected to apparent solar time by the
+        ! equation of time.
+        hour_utc   = (day_time - floor(day_time))*2.0_dp*pi
+        solar_time = hour_utc + lon*deg_to_rad + eqtime_now
+        hour_angle = solar_time - pi
+
+        latrad = lat*deg_to_rad
+
+        cosz = sin(latrad)*sin(decl_now) + cos(latrad)*cos(decl_now)*cos(hour_angle)
+
+        if (present(decl))   decl   = decl_now
+        if (present(eqtime)) eqtime = eqtime_now
+
+        return
+
+    end subroutine calc_solar_position
 
     subroutine calc_orbital_par(orb,time,per,ecc,obl,tper,zan)
         !
@@ -365,164 +493,6 @@ contains
 
     end subroutine check_day_year
 
-    subroutine ORBIT(ECC,XOBCH,TPERI,ZAVEXPE,  &
-                     PCLOCK,PYTIME,TTROP,PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
-    !   *ORBIT* - FOR SOLAR ORBITAL PARAMETERS.
-!
-!       J.F.GELEYN     E.C.M.W.F.     03/06/82.
-!
-!       CHANGED TO 18000YBP-CONDITIONS BY LAUTENSCHLAGER
-!                       MPI F. METEOR. HAMBURG  4.87
-!       CHANGED TO OPTIONAL ORBITAL PARAMETERS BY GRAF, MPI 1/91
-!       CHANGED AGAIN TO A MORE EXACT SOLUTION BY HOFFMANN, MPI 7/93
-!       REVISED BY LORENZ, UNIVERSITY OF BREMEN, 10/93
-!       -- last change: 94-08-03
-!       -- Converted to FORTRAN90 by A. Robinson, 12/2013
-!
-!       PURPOSE.
-!       --------
-!
-!            THIS ROUTINE COMPUTES THE SOLAR CONSTANT NORMALISED BY ITS
-!       ANNUAL MEAN AND THREE ORBITAL PARAMETERS DEPENDING ON THE TIME
-!       OF THE DAY AS WELL AS OF THE YEAR (BOTH IN RADIANS). TIME SCALE
-!       ORIGIN IS 01/01 00 GMT OF THE DESIGNED TIME DISC. THE DIFFERENT
-!       TIME DISCS ARE SCALED ON 03/21 12 GMT AS THE TIME OF THE VERNAL
-!       EQUINOX. ALSO RETURNED IS A CONSTANT FOR THE EFFECT OF THE EARTH'S
-!       CURVATURE ON THE COSINE OF THE SOLAR ZENITH ANGLE.
-!
-!       THE ORBITAL PARAMETERS CAN BE TAKEN FROM PROGRAM BERGOR, WRITTEN
-!       BY LORENZ, UNIVERSITY OF BREMEN, 8/94
-!
-!       THERE ARE SEVEN DUMMY ARGUMENTS: 
-!       
-!       *PCLOCK* IS THE TIME OF THE DAY
-!       *PYTIME* IS THE TIME OF THE YEAR (BOTH IN RADIANS).
-!       *PDISSE* IS THE RATIO OF THE SOLAR CONSTANT TO ITS ANNUAL MEAN
-!       *PZEN1*, *PZEN2* AND *PZEN3* ARE ZENITHAL PARAMETERS.
-!       *PRAE* IS THE RATIO OF THE HEIGHT OF THE EQUIVALENT ATMOSPHERE 
-!       TO THE RADIUS OF THE EARTH.
-
-!       *ZCDIS*, *ZCDEC* AND *ZCEQT* ARE ARRAYS FOR A SECOND ORDER
-!       *FOURIER DEVELOPMENT FOR RESPECTIVELY: SOLAR CONSTANT, SOLAR
-!       DECLINATION AND EQUATION OF TIME.
-!       THEY ARE VALID FOR TODAY'S ORBITAL PARAMETERS ONLY (LORENZ, 11/93).
-!
-!       DIMENSION ZCDIS(5),ZCDEC(5),ZCEQT(5)
-!       DATA ZCDIS/+1.000110,+0.034221,+0.001280,+0.000719,+0.000077/
-!       DATA ZCDEC/+0.006918,-0.399912,+0.070257,-0.006758,+0.000907/
-!       DATA ZCEQT/+0.000075,+0.001868,-0.032077,-0.014615,-0.040849/
-!
-!       *ZRAE* IS THE VALUE FOR *PRAE*.
-!
-        real (dp), parameter :: ZRAE = 0.1277e-02_dp   
-
-
-        real (dp) :: BTIME, ECC, XOBCH, TPERI, ZAVEXPE
-        real (dp) :: PCLOCK, PYTIME, PDISSE, PZEN1, PZEN2, PZEN3, PRAE
-
-        ! Length of the tropical year, in the same day units as TPERI and
-        ! PYTIME. Supplied by the caller rather than fixed at 360 so that the
-        ! solution can be labelled on a 365- or 366-day calendar.
-        real (dp) :: TTROP
-
-        real (dp) :: ZCLOCK, ZYTIME
-
-        real (dp) :: time, eold, enew, eps, epc, zeps, cose, E
-        real (dp) :: ZDISSE, zsqecc, ztgean, znu, zlambda, xobche
-        real (dp) :: zsinde, zdecli, ZZEN1, ZZEN2, ZZEN3 
-        integer   :: niter 
-
-        ! == PRELIMINARY SETTINGS ==
-
-        ZCLOCK = PCLOCK
-        ZYTIME = PYTIME
-
-!       DAY OF VERNAL EQUINOX: DEFINED ON 21. OF MARCH, 12.00 GMT
-!       (BEGIN OF YEAR: 01. OF JANUARY, 0.00 GMT: ZYTIME=0.0, THEREAFTER
-!       E. G. 2. OF JANUARY 12.00 GMT: TIME IN DAYS FROM BEGIN OF YEAR = 1.5)
-!       - NOT USED IN THE EXACT FORMULATION, *ZAVEXPE* USED INSTEAD
-!       TVEREX=80.5              ! TROPICAL YEAR: 360 DAYS
-!       TVEREX=79.5              ! TROPICAL YEAR: 365 DAYS
-
-!        ***  ORBITAL PARAMETERS : VALUES FOR DIFFERENT TIME DISCS
-!             THESE VALUES CAN BE TAKEN FROM PROGRAM BERGOR (S. LORENZ)
-!
-!       2. COMPUTATIONS
-!          ------------
-
-!       ZC1YT=COS(ZYTIME)
-!       ZS1YT=SIN(ZYTIME)
-!       ZC2YT=ZC1YT**2-ZS1YT**2
-!       ZS2YT=2.*ZS1YT*ZC1YT
-!
-!       CALCULATE ECCENTRI!   ANOMALY:
-!
-!       LESS EXACT METHOD OF H. GRAF: SIN(E)=E
-!       E=(ZYTIME - 2*PI*TPERI/TTROP) / (1.-ECC)
-!
-!       EXACT CALCULATION WITH KEPLER'S LAW (ELLIPSE)
-!       (MONIN, 1986 : AN INTRODUCTION TO THE THEORY OF CLIMATE)
-!       USE FIRST DERIVATIVE (NEWTON) TO CALCULATE SOLUTION OF
-!       EQUATION OF ECCENTRI!   ANOMALY *E*
-!
-        time  = ZYTIME-2.0_dp*pi*TPERI/TTROP 
-        eold  = time/(1.0_dp-ECC)
-        enew  = time
-        eps   = 1.e-6_dp 
-        niter = 0
-        zeps  = eold - enew
-
-        do while ( dabs(zeps) .gt. eps ) 
-            zeps = eold - enew
-            if (niter .ge. 30) then 
-                write(*,*) ' SUBROUTINE *ORBIT* - eccentri!   anomaly not found!'
-                write(*,*) ' ERROR IN   *ORBIT* -- STOP'
-                error stop 1
-            end if 
-
-            niter = niter+1
-            eold  = enew
-            cose  = cos(enew)
-            enew  = (time+ECC*(sin(enew)-enew*cose))/(1.0_dp-ECC*cose)
-        end do 
-
-        E      = enew
-        ZDISSE = (1.0_dp/(1.0_dp-ECC*cos(E)))**2
-
-!       Change in the calculation of the declination.
-!       Used are not the formulas from Paltridge/Platt as in the ECHAM model
-!       with fixed constants for contemporanious conditions
-!       but the exact equations from Monin (s.a. - Keplers law)
-!       are solved. Day of vernal equinox is fixed for a 360 day year on the
-!       21. Maerz noon, with start of year at 01/01/00 GMT (s.a.).
-
-        zsqecc = sqrt((1_dp+ECC)/(1_dp-ECC))
-        ztgean = tan(E/2_dp)
-
-!       znu: true anomaly (actual angle of Earth's position from perihelion)
-!       zlambda: true longitude of the Earth (actual angle from vernal equinox)
-
-        znu     = 2.0_dp*atan(zsqecc*ztgean)
-        zlambda = znu + zavexpe
-        xobche  = xobch/180.0_dp*pi
-        zsinde  = sin(xobche)*sin(zlambda)
-        zdecli  = asin(zsinde)
-
-        ZZEN1 = sin(ZDECLI)
-        ZZEN2 = cos(ZDECLI)*cos(ZCLOCK)
-        ZZEN3 = cos(ZDECLI)*sin(ZCLOCK)
-
-        ! 3. RETURN
-        !    ------
-
-        PDISSE = ZDISSE
-        PZEN1  = ZZEN1
-        PZEN2  = ZZEN2
-        PZEN3  = ZZEN3
-        PRAE   = ZRAE
  
-        return
-
-    end subroutine ORBIT 
 
 end module insol_orbit
