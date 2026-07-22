@@ -37,10 +37,15 @@ program test_insol
     integer :: n_pass = 0
     integer :: n_fail = 0
 
+    ! Shared state for the point queries. Grid-based checks build their own.
+    type(insol_class) :: is
+
     write(*,*)
     write(*,*) "=============================================="
     write(*,*) " insol regression tests"
     write(*,*) "=============================================="
+
+    call insol_init(is,fldr=fldr,S0=S0_ref)
 
     call test_reference_values()
     call test_interface_consistency()
@@ -51,6 +56,8 @@ program test_insol
     write(*,*)
     write(*,"(a,i0,a,i0,a)") "  ", n_pass, " passed, ", n_fail, " failed"
     write(*,*)
+
+    call insol_end(is)
 
     if (n_fail > 0) then
         write(*,*) "FAILED"
@@ -91,7 +98,7 @@ contains
 
             read(line,*) time_bp, lat, day, insol_ref, coszm_ref
 
-            insol = calc_insol_day(day,lat,time_bp,S0=S0_ref,fldr=fldr)
+            call calc_insol_day(is,insol,day,lat,time_bp)
 
             err = abs(insol - insol_ref)
             if (err > err_max) err_max = err
@@ -128,19 +135,24 @@ contains
         real(dp) :: insol_pt
         real(dp) :: err_1D, err_2D
         integer  :: i, j, day
+        type(insol_class) :: is1D, is2D
 
         do i = 1, nlat
             lats(i) = -90.0_dp + (i-1)*180.0_dp/real(nlat-1,dp)
         end do
 
+        call insol_init(is1D,lats,fldr=fldr,S0=S0_ref)
+
         err_1D = 0.0_dp
         do day = 1, 360, 7
-            insol_1D = calc_insol_day(day,lats,0.0_dp,S0=S0_ref,fldr=fldr)
+            call calc_insol_day(is1D,insol_1D,day,0.0_dp)
             do i = 1, nlat
-                insol_pt = calc_insol_day(day,lats(i),0.0_dp,S0=S0_ref,fldr=fldr)
+                call calc_insol_day(is,insol_pt,day,lats(i),0.0_dp)
                 err_1D = max(err_1D, abs(insol_1D(i)-insol_pt))
             end do
         end do
+
+        call insol_end(is1D)
 
         call check("point vs vector interface", err_1D, tol_ref, &
                    "max |insol_1D - insol_pt| [W/m2]")
@@ -151,16 +163,20 @@ contains
         end do
         end do
 
+        call insol_init(is2D,lats2D,fldr=fldr,S0=S0_ref)
+
         err_2D = 0.0_dp
         do day = 1, 360, 30
-            insol_2D = calc_insol_day(day,lats2D,0.0_dp,S0=S0_ref,fldr=fldr)
+            call calc_insol_day(is2D,insol_2D,day,0.0_dp)
             do j = 1, ny
             do i = 1, nx
-                insol_pt = calc_insol_day(day,lats2D(i,j),0.0_dp,S0=S0_ref,fldr=fldr)
+                call calc_insol_day(is,insol_pt,day,lats2D(i,j),0.0_dp)
                 err_2D = max(err_2D, abs(insol_2D(i,j)-insol_pt))
             end do
             end do
         end do
+
+        call insol_end(is2D)
 
         call check("point vs 2D interface", err_2D, tol_ref, &
                    "max |insol_2D - insol_pt| [W/m2]")
@@ -182,20 +198,25 @@ contains
         real(dp) :: lats(nlat), insol(nlat)
         real(dp) :: worst_low, worst_high
         integer  :: i, day
+        type(insol_class) :: isg
 
         do i = 1, nlat
             lats(i) = -90.0_dp + (i-1)*180.0_dp/real(nlat-1,dp)
         end do
 
+        call insol_init(isg,lats,fldr=fldr,S0=S0_ref)
+
         worst_low  = 0.0_dp
         worst_high = 0.0_dp
 
         do day = 1, 360
-            insol = calc_insol_day(day,lats,0.0_dp,S0=S0_ref,fldr=fldr)
+            call calc_insol_day(isg,insol,day,0.0_dp)
             worst_low  = min(worst_low, minval(insol))
             ! Allow for the Earth-Sun distance factor at perihelion (~3.4%).
             worst_high = max(worst_high, maxval(insol) - 1.05_dp*S0_ref)
         end do
+
+        call insol_end(isg)
 
         call check("non-negativity", -worst_low, 0.0_dp, "most negative value [W/m2]")
         call check("upper bound",    worst_high, 0.0_dp, "excess over 1.05*S0 [W/m2]")
@@ -212,8 +233,8 @@ contains
 
         ! Day 355 is close to the December solstice in a 360-day year, with the
         ! north pole in polar night and the south pole in polar day.
-        insol_n = calc_insol_day(355,  90.0_dp, 0.0_dp, S0=S0_ref, fldr=fldr)
-        insol_s = calc_insol_day(355, -90.0_dp, 0.0_dp, S0=S0_ref, fldr=fldr)
+        call calc_insol_day(is, insol_n, 355,  90.0_dp, 0.0_dp)
+        call calc_insol_day(is, insol_s, 355, -90.0_dp, 0.0_dp)
 
         call check("polar night (90N, day 355)", insol_n, 0.0_dp, "insolation [W/m2]")
 
@@ -240,17 +261,22 @@ contains
         real(dp) :: mu, lats(nmu), insol(nmu)
         real(dp) :: total, mean, expected, rel_err
         integer  :: i, day
+        type(insol_class) :: isg
 
         do i = 1, nmu
             mu = (real(i,dp)-0.5_dp)/real(nmu,dp)*2.0_dp - 1.0_dp
             lats(i) = asin(mu)*180.0_dp/pi
         end do
 
+        call insol_init(isg,lats,fldr=fldr,S0=S0_ref)
+
         total = 0.0_dp
         do day = 1, nday
-            insol = calc_insol_day(day,lats,0.0_dp,S0=S0_ref,fldr=fldr)
+            call calc_insol_day(isg,insol,day,0.0_dp)
             total = total + sum(insol)
         end do
+
+        call insol_end(isg)
 
         mean     = total/real(nday*nmu,dp)
         expected = S0_ref/(4.0_dp*sqrt(1.0_dp-ecc_1950**2))

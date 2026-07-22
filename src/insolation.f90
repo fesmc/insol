@@ -22,319 +22,596 @@
 
 module insolation
 
-    use insol_defs, only : dp, wp, pi, deg_to_rad => degrees_to_radians
+    use insol_defs, only : dp, wp, pi, deg_to_rad => degrees_to_radians, &
+                           S0_default, day_year_default
 
     implicit none
 
-
-    type orbit_class
+    type insol_class
+        ! Orbital element table (Laskar et al. 2004), loaded once by insol_init
+        ! and read-only thereafter.
         integer :: n_orbit
-        real (dp), dimension(:), allocatable :: time, eccm, perm, xobm
+        real(dp), allocatable :: time(:)     ! [ka] relative to 1950
+        real(dp), allocatable :: eccm(:)     ! Eccentricity
+        real(dp), allocatable :: xobm(:)     ! Obliquity [degrees]
+        real(dp), allocatable :: perm(:)     ! Longitude of perihelion [degrees]
+
+        ! Configuration, fixed at initialization
+        real(dp) :: S0                       ! Solar constant [W/m2]
+        integer  :: day_year                 ! Days in the year
+
+        ! Optional latitude grid. When one is given, sin and cos of every
+        ! latitude are precomputed here rather than recomputed on every call --
+        ! for a fixed model grid this is the dominant cost of the daily kernel.
+        ! Stored flat, with the original shape kept so output can be reshaped.
+        logical  :: grid
+        integer  :: n_lat                    ! Total number of grid points
+        integer  :: n1, n2                   ! Grid shape (n2 = 0 for a 1D grid)
+        real(dp), allocatable :: sinlat(:)
+        real(dp), allocatable :: coslat(:)
     end type
 
-    type(orbit_class) :: OPAR 
+    ! A state is initialized either bare -- valid only for point queries -- or
+    ! with a 1D or 2D latitude grid, which additionally enables the grid
+    ! routines below.
+    interface insol_init
+        module procedure insol_init_nogrid
+        module procedure insol_init_1D
+        module procedure insol_init_2D
+    end interface
 
+    ! Daily-mean insolation. Resolved on the rank of `insol`: rank 1 or 2 with
+    ! no latitude argument uses the grid held in `is`; rank 0 with an explicit
+    ! latitude is a one-off point query needing no grid.
     interface calc_insol_day
-        module procedure calc_insol_day_pt  
         module procedure calc_insol_day_1D
-        module procedure calc_insol_day_2D 
-    end interface 
+        module procedure calc_insol_day_2D
+        module procedure calc_insol_day_pt
+    end interface
 
+    ! Daily-mean insolation for several days at once. `insol` carries one
+    ! extra trailing dimension for the days.
     interface calc_insol_days
-        module procedure calc_insol_days_pt
         module procedure calc_insol_days_1D
         module procedure calc_insol_days_2D
     end interface
 
-    private
-    public :: calc_insol_ave_pt
-    public :: calc_insol_day 
-    public :: calc_insol_days
+    ! Insolation averaged over a range of days (eg. a season or the year).
+    interface calc_insol_ave
+        module procedure calc_insol_ave_1D
+        module procedure calc_insol_ave_2D
+    end interface
 
-contains 
+    private
+    public :: insol_class
+    public :: insol_init
+    public :: insol_end
+    public :: calc_insol_day
+    public :: calc_insol_days
+    public :: calc_insol_ave
+
+contains
 
 ! =====================================================================================================
-! Interface functions for routines for annual mean insolation
+! Initialization
 
-    function calc_insol_ave_pt(day_range,lat,time_bp,S0,day_year,fldr,step) result(insol)
-        ! Given a range of days of the year, latitude and time before present,
-        ! Calculate the average insolation at each latitude for the day_range
-        ! time_bp = years before present (present==1950)
+    subroutine insol_init_nogrid(is,fldr,S0,day_year)
+        ! Load the orbital tables without a latitude grid. The resulting state
+        ! supports point queries only.
 
-        implicit none 
+        implicit none
 
-        integer,  intent(IN) :: day_range(2)
-        real(dp), intent(IN) :: lat
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer,  intent(IN), optional :: day_year
-        character(len=*), optional :: fldr 
-        integer,  intent(IN), optional :: step 
-        real(dp) :: insol
-        
+        type(insol_class), intent(INOUT) :: is
+        character(len=*),  intent(IN), optional :: fldr
+        real(dp),          intent(IN), optional :: S0
+        integer,           intent(IN), optional :: day_year
+
+        call insol_config(is,fldr,S0,day_year)
+
+        is%grid  = .FALSE.
+        is%n_lat = 0
+        is%n1    = 0
+        is%n2    = 0
+
+        return
+
+    end subroutine insol_init_nogrid
+
+    subroutine insol_init_1D(is,lats,fldr,S0,day_year)
+        ! Load the orbital tables and precompute the geometry of a 1D latitude grid.
+
+        implicit none
+
+        type(insol_class), intent(INOUT) :: is
+        real(dp),          intent(IN)    :: lats(:)
+        character(len=*),  intent(IN), optional :: fldr
+        real(dp),          intent(IN), optional :: S0
+        integer,           intent(IN), optional :: day_year
+
+        call insol_config(is,fldr,S0,day_year)
+        call insol_set_grid(is,reshape(lats,[size(lats)]),size(lats),0)
+
+        return
+
+    end subroutine insol_init_1D
+
+    subroutine insol_init_2D(is,lats,fldr,S0,day_year)
+        ! Load the orbital tables and precompute the geometry of a 2D latitude grid.
+
+        implicit none
+
+        type(insol_class), intent(INOUT) :: is
+        real(dp),          intent(IN)    :: lats(:,:)
+        character(len=*),  intent(IN), optional :: fldr
+        real(dp),          intent(IN), optional :: S0
+        integer,           intent(IN), optional :: day_year
+
+        call insol_config(is,fldr,S0,day_year)
+        call insol_set_grid(is,reshape(lats,[size(lats)]),size(lats,1),size(lats,2))
+
+        return
+
+    end subroutine insol_init_2D
+
+    subroutine insol_end(is)
+        ! Release the orbital tables and any cached grid geometry.
+
+        implicit none
+
+        type(insol_class), intent(INOUT) :: is
+
+        if (allocated(is%time))   deallocate(is%time)
+        if (allocated(is%eccm))   deallocate(is%eccm)
+        if (allocated(is%xobm))   deallocate(is%xobm)
+        if (allocated(is%perm))   deallocate(is%perm)
+        if (allocated(is%sinlat)) deallocate(is%sinlat)
+        if (allocated(is%coslat)) deallocate(is%coslat)
+
+        is%grid  = .FALSE.
+        is%n_lat = 0
+
+        return
+
+    end subroutine insol_end
+
+! =====================================================================================================
+! Daily-mean insolation
+
+    subroutine calc_insol_day_pt(is,insol,day,lat,time_bp)
+        ! Daily-mean insolation at one latitude. Needs no latitude grid, so it
+        ! works with a state initialized by insol_init(is) alone.
+        ! time_bp = years before present (present == 1950)
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: lat
+        real(dp),          intent(IN)  :: time_bp
+
         ! Local variables
-        integer  :: day, ndays
-        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
         real(dp) :: decl, dist2
-        real(dp) :: S0_value
-        integer  :: day_max
-        integer  :: day_step
 
+        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
 
-        if (day_range(2) .le. day_range(1)) then
-            write(*,*) "calc_insol_ave_pt:: Error: day_range must give a positive total of days to calculate."
-            write(*,*) "day_range: ", day_range 
-            stop 
-        end if 
+        insol = real(calc_insol_day_internal(lat,decl,dist2,is%S0),wp)
 
-        ! Determine the step to use for the integration
+        return
+
+    end subroutine calc_insol_day_pt
+
+    subroutine calc_insol_day_1D(is,insol,day,time_bp)
+        ! Daily-mean insolation over the 1D latitude grid held in `is`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+
+        ! Local variables
+        real(dp) :: decl, dist2
+
+        call check_grid(is,size(insol),1,"calc_insol_day")
+
+        ! The solar geometry does not depend on latitude, so it is evaluated
+        ! once and reused for every grid point.
+        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+
+        call calc_insol_grid(is,insol,decl,dist2)
+
+        return
+
+    end subroutine calc_insol_day_1D
+
+    subroutine calc_insol_day_2D(is,insol,day,time_bp)
+        ! Daily-mean insolation over the 2D latitude grid held in `is`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+
+        ! Local variables
+        real(dp) :: decl, dist2
+        real(wp) :: insol1D(is%n_lat)
+
+        call check_grid(is,size(insol),2,"calc_insol_day")
+
+        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+
+        call calc_insol_grid(is,insol1D,decl,dist2)
+
+        insol = reshape(insol1D,[is%n1,is%n2])
+
+        return
+
+    end subroutine calc_insol_day_2D
+
+! =====================================================================================================
+! Daily-mean insolation over several days
+
+    subroutine calc_insol_days_1D(is,insol,days,time_bp)
+        ! Daily-mean insolation over the 1D latitude grid, for each day in `days`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)     ! [lat,day]
+        integer,           intent(IN)  :: days(:)
+        real(dp),          intent(IN)  :: time_bp
+
+        ! Local variables
+        integer  :: q
+        real(dp) :: decl, dist2
+
+        call check_grid(is,size(insol,1),1,"calc_insol_days")
+        call check_ndays(size(insol,2),size(days),"calc_insol_days")
+
+        do q = 1, size(days)
+            call calc_solar_geometry_day(is,decl,dist2,days(q),time_bp)
+            call calc_insol_grid(is,insol(:,q),decl,dist2)
+        end do
+
+        return
+
+    end subroutine calc_insol_days_1D
+
+    subroutine calc_insol_days_2D(is,insol,days,time_bp)
+        ! Daily-mean insolation over the 2D latitude grid, for each day in `days`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:,:)   ! [x,y,day]
+        integer,           intent(IN)  :: days(:)
+        real(dp),          intent(IN)  :: time_bp
+
+        ! Local variables
+        integer  :: q
+        real(dp) :: decl, dist2
+        real(wp) :: insol1D(is%n_lat)
+
+        call check_grid(is,size(insol,1)*size(insol,2),2,"calc_insol_days")
+        call check_ndays(size(insol,3),size(days),"calc_insol_days")
+
+        do q = 1, size(days)
+            call calc_solar_geometry_day(is,decl,dist2,days(q),time_bp)
+            call calc_insol_grid(is,insol1D,decl,dist2)
+            insol(:,:,q) = reshape(insol1D,[is%n1,is%n2])
+        end do
+
+        return
+
+    end subroutine calc_insol_days_2D
+
+! =====================================================================================================
+! Insolation averaged over a range of days
+
+    subroutine calc_insol_ave_1D(is,insol,day_range,time_bp,step)
+        ! Mean insolation over an inclusive range of days, on the 1D grid.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:)
+        integer,           intent(IN)  :: day_range(2)
+        real(dp),          intent(IN)  :: time_bp
+        integer,           intent(IN), optional :: step
+
+        ! Local variables
+        integer  :: day, ndays, day_step
+        real(dp) :: decl, dist2
+        real(wp) :: insol_day(is%n_lat)
+
+        call check_grid(is,size(insol),1,"calc_insol_ave")
+        call check_day_range(day_range,"calc_insol_ave")
+
         day_step = 1
-        if (present(step)) day_step = step 
+        if (present(step)) day_step = step
 
-        ! Define the solar constant
-        S0_value = 1365.0_dp
-        if (present(S0)) S0_value = S0  
-
-        ! Define year length in days 
-        day_max = 360
-        if (present(day_year)) day_max = day_year
-
-        ! Calculate orbital parameters for current year 
-        call calc_orbital_par(time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE,fldr)
-
-        insol = 0.0 
+        insol = 0.0_wp
         ndays = 0
 
         do day = day_range(1), day_range(2), day_step
-
-            ! Get the solar geometry for this day
-            call calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
-
-            ! Calculate daily insolation at latitude of interest
-            insol = insol + calc_insol_day_internal(lat,decl,dist2,S0_value)
-
+            call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+            call calc_insol_grid(is,insol_day,decl,dist2)
+            insol = insol + insol_day
             ndays = ndays + 1
         end do
 
-        ! Get the average 
-        insol = insol / real(ndays,dp)
-
-        return 
-
-    end function calc_insol_ave_pt
-
-
-! =====================================================================================================
-! Interface functions for routines for a single day
-    
-    function calc_insol_day_pt(day,lat,time_bp,S0,day_year,fldr) result(insol)
-        ! Given day of year, latitudes and time before present,
-        ! Calculate the daily insolation values at each latitude 
-        ! time_bp = years before present (present==1950)
-
-        implicit none 
-
-        integer,  intent(IN) :: day
-        real(dp), intent(IN) :: lat
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer,  intent(IN), optional :: day_year
-        character(len=*), optional :: fldr 
-        real(dp) :: insol
-        
-        ! Local variables
-        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
-        real(dp) :: decl, dist2
-        real(dp) :: S0_value
-        integer  :: day_max
-
-        ! Define the solar constant
-        S0_value = 1365.0_dp
-        if (present(S0)) S0_value = S0
-
-        ! Define year length in days
-        day_max = 360
-        if (present(day_year)) day_max = day_year
-
-        ! Calculate orbital parameters for current year
-        call calc_orbital_par(time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE,fldr)
-
-        ! Get the solar geometry for this day
-        call calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
-
-        ! Calculate daily insolation at latitude of interest
-        insol = calc_insol_day_internal(lat,decl,dist2,S0_value)
+        insol = insol / real(ndays,wp)
 
         return
 
-    end function calc_insol_day_pt
+    end subroutine calc_insol_ave_1D
 
-    function calc_insol_day_1D(day,lats,time_bp,S0,day_year,fldr) result(insol)
-        ! Given day of year, latitudes and time before present,
-        ! Calculate the daily insolation values at each latitude 
-        ! time_bp = years before present (present==1950)
+    subroutine calc_insol_ave_2D(is,insol,day_range,time_bp,step)
+        ! Mean insolation over an inclusive range of days, on the 2D grid.
 
-        implicit none 
+        implicit none
 
-        integer,  intent(IN) :: day
-        real(dp), intent(IN) :: lats(:)
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer,  intent(IN), optional :: day_year
-        character(len=*), intent(IN), optional :: fldr
-        real(dp) :: insol(size(lats))
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)
+        integer,           intent(IN)  :: day_range(2)
+        real(dp),          intent(IN)  :: time_bp
+        integer,           intent(IN), optional :: step
+
+        ! Local variables
+        integer  :: day, ndays, day_step
+        real(dp) :: decl, dist2
+        real(wp) :: insol1D(is%n_lat), insol_day(is%n_lat)
+
+        call check_grid(is,size(insol),2,"calc_insol_ave")
+        call check_day_range(day_range,"calc_insol_ave")
+
+        day_step = 1
+        if (present(step)) day_step = step
+
+        insol1D = 0.0_wp
+        ndays   = 0
+
+        do day = day_range(1), day_range(2), day_step
+            call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+            call calc_insol_grid(is,insol_day,decl,dist2)
+            insol1D = insol1D + insol_day
+            ndays   = ndays + 1
+        end do
+
+        insol = reshape(insol1D,[is%n1,is%n2]) / real(ndays,wp)
+
+        return
+
+    end subroutine calc_insol_ave_2D
+
+! =====================================================================================================
+! Internal helpers
+
+    subroutine insol_config(is,fldr,S0,day_year)
+        ! Apply configuration defaults and load the orbital tables.
+
+        implicit none
+
+        type(insol_class), intent(INOUT) :: is
+        character(len=*),  intent(IN), optional :: fldr
+        real(dp),          intent(IN), optional :: S0
+        integer,           intent(IN), optional :: day_year
+
+        is%S0 = S0_default
+        if (present(S0)) is%S0 = S0
+
+        is%day_year = day_year_default
+        if (present(day_year)) is%day_year = day_year
+
+        call load_orbital_table(is,fldr)
+
+        return
+
+    end subroutine insol_config
+
+    subroutine insol_set_grid(is,lats,n1,n2)
+        ! Precompute and store the geometry of a latitude grid. `lats` arrives
+        ! flattened; n2 = 0 marks a 1D grid.
+
+        implicit none
+
+        type(insol_class), intent(INOUT) :: is
+        real(dp),          intent(IN)    :: lats(:)
+        integer,           intent(IN)    :: n1, n2
 
         ! Local variables
         integer  :: j
-        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
-        real(dp) :: decl, dist2
-        real(dp) :: S0_value
-        integer  :: day_max
+        real(dp) :: latrad
 
-        ! Define the solar constant
-        S0_value = 1365.0_dp
-        if (present(S0)) S0_value = S0
+        if (allocated(is%sinlat)) deallocate(is%sinlat)
+        if (allocated(is%coslat)) deallocate(is%coslat)
 
-        ! Define year length in days
-        day_max = 360
-        if (present(day_year)) day_max = day_year
+        is%n_lat = size(lats)
+        is%n1    = n1
+        is%n2    = n2
+        is%grid  = .TRUE.
 
-        ! Calculate orbital parameters for current year
-        call calc_orbital_par(time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE,fldr)
+        allocate(is%sinlat(is%n_lat),is%coslat(is%n_lat))
 
-        ! Get the solar geometry for this day. It does not depend on latitude,
-        ! so it is computed once and reused for every point.
-        call calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
-
-        ! Calculate daily insolation at each latitude
-        do j = 1, size(lats)
-            insol(j) = calc_insol_day_internal(lats(j),decl,dist2,S0_value)
+        do j = 1, is%n_lat
+            latrad       = lats(j)*deg_to_rad
+            is%sinlat(j) = sin(latrad)
+            is%coslat(j) = cos(latrad)
         end do
 
         return
 
-    end function calc_insol_day_1D
+    end subroutine insol_set_grid
 
-    function calc_insol_day_2D(day,lats,time_bp,S0,day_year,fldr) result(insol)
-        ! Wrapper function to calculate 2D array of insolation values
-        ! for a given day, given a 2D array of latitude values
-        ! time_bp = years before present (present==1950)
+    subroutine calc_insol_grid(is,insol,decl,dist2)
+        ! Evaluate the daily kernel at every point of the cached grid, reusing
+        ! the precomputed sin/cos of each latitude.
 
-        implicit none 
+        implicit none
 
-        integer,  intent(IN) :: day
-        real(dp), intent(IN) :: lats(:,:) 
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer,  intent(IN), optional :: day_year
-        character(len=*), intent(IN), optional :: fldr 
-        real (dp) :: insol(size(lats,1),size(lats,2))
-        
-        ! Local variables 
-        integer :: n 
-        real(dp), allocatable :: lats1D(:)
-        real(dp), allocatable :: insol1D(:)
-        
-        n = size(lats,1)*size(lats,2)
-        allocate(lats1D(n),insol1D(n))
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:)
+        real(dp),          intent(IN)  :: decl, dist2
 
-        lats1D = reshape(lats,[n])
-        insol1D = calc_insol_day_1D(day,lats1D,time_bp,S0,day_year,fldr)
-        insol = reshape(insol1D,[size(lats,1),size(lats,2)])
+        call calc_insol_kernel(insol,is%sinlat,is%coslat,decl,dist2,is%S0)
 
-        return 
+        return
 
-    end function calc_insol_day_2D
+    end subroutine calc_insol_grid
 
-! =====================================================================================================
-! Interface functions for routines with a vector of days
+    subroutine calc_insol_kernel(insol,sinlat,coslat,decl,dist2,S0)
+        ! The grid loop, taking its arrays directly rather than reaching through
+        ! the state object. Declaring them contiguous tells the compiler the
+        ! iterations are independent and unit-strided, which it cannot assume for
+        ! allocatable components accessed through a derived type.
 
-    function calc_insol_days_pt(days,lat,time_bp,S0,day_year,fldr) result(insol)
-        ! Given day of year, latitudes and time before present,
-        ! Calculate the daily insolation values at each latitude 
-        ! time_bp = years before present (present==1950)
+        implicit none
 
-        implicit none 
+        real(wp), intent(OUT) :: insol(:)
+        real(dp), intent(IN), contiguous :: sinlat(:)
+        real(dp), intent(IN), contiguous :: coslat(:)
+        real(dp), intent(IN)  :: decl, dist2, S0
 
-        integer,  intent(IN) :: days(:)
-        real(dp), intent(IN)  :: lat
-        real(dp), intent(IN)  :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer,  intent(IN), optional :: day_year
-        character(len=*), intent(IN), optional :: fldr 
-        real(dp) :: insol(size(days))
-        
         ! Local variables
-        integer :: q 
+        integer  :: j
+        real(dp) :: sindec, cosdec, fac
+        real(dp) :: denom, cosH0, H0, sinH0
 
-        do q = 1, size(days,1)
-            insol(q) = calc_insol_day_pt(days(q),lat,time_bp,S0,day_year,fldr)
-        end do 
+        ! Hoist everything that does not vary over the grid out of the loop.
+        sindec = sin(decl)
+        cosdec = cos(decl)
+        fac    = S0*dist2/pi
 
-        return 
+        do j = 1, size(sinlat)
 
-    end function calc_insol_days_pt
-    
-    function calc_insol_days_1D(days,lats,time_bp,S0,day_year,fldr) result(insol)
-        ! Given day of year, latitudes and time before present,
-        ! Calculate the daily insolation values at each latitude 
-        ! time_bp = years before present (present==1950)
+            denom = coslat(j)*cosdec
+            if (abs(denom) .lt. 1.0e-14_dp) then
+                cosH0 = sign(1.0_dp,-sinlat(j)*sindec)
+            else
+                cosH0 = -sinlat(j)*sindec/denom
+            end if
 
-        implicit none 
+            if (cosH0 .ge. 1.0_dp) then
+                H0    = 0.0_dp
+                sinH0 = 0.0_dp
+            else if (cosH0 .le. -1.0_dp) then
+                H0    = pi
+                sinH0 = 0.0_dp
+            else
+                H0    = acos(cosH0)
+                sinH0 = sqrt(1.0_dp-cosH0*cosH0)
+            end if
 
-        integer,  intent(IN) :: days(:)
-        real(dp), intent(IN) :: lats(:) 
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer, intent(IN),  optional :: day_year
-        character(len=*), intent(IN), optional :: fldr 
-        real(dp) :: insol(size(lats,1),size(days,1))
-        
-        
+            insol(j) = real(fac*(H0*sinlat(j)*sindec + coslat(j)*cosdec*sinH0),wp)
+
+        end do
+
+        return
+
+    end subroutine calc_insol_kernel
+
+    subroutine calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        ! Orbital elements for `time_bp` and the solar geometry for `day`.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(dp),          intent(OUT) :: decl, dist2
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+
         ! Local variables
-        integer :: q 
+        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
 
-        do q = 1, size(days,1)
-            insol(:,q) = calc_insol_day_1D(days(q),lats,time_bp,S0,day_year,fldr)
-        end do 
+        call calc_orbital_par(is,time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE)
+        call calc_solar_geometry(decl,dist2,day,is%day_year,ECC,XOBCH,TPERI,ZAVEXPE)
 
-        return 
+        return
 
-    end function calc_insol_days_1D
+    end subroutine calc_solar_geometry_day
 
-    function calc_insol_days_2D(days,lats,time_bp,S0,day_year,fldr) result(insol)
-        ! Wrapper function to calculate 2D array of insolation values
-        ! for a given day, given a 2D array of latitude values
-        ! time_bp = years before present (present==1950)
+    subroutine check_grid(is,n_given,rank_given,routine)
+        ! Fail loudly when a grid routine is called on a state that has no grid,
+        ! or when the output array does not match the grid it was initialized with.
 
-        implicit none 
+        implicit none
 
-        integer,  intent(IN) :: days(:)
-        real(dp), intent(IN) :: lats(:,:) 
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN), optional :: S0
-        integer,  intent(IN), optional :: day_year
-        character(len=*), intent(IN), optional :: fldr 
-        real (dp) :: insol(size(lats,1),size(lats,2),size(days,1))
-        
-        ! Local variables 
-        integer :: n, q 
-        real(dp), allocatable :: lats1D(:)
-        real(dp), allocatable :: insol1D(:)
-        
-        n = size(lats,1)*size(lats,2)
-        allocate(lats1D(n),insol1D(n))
+        type(insol_class), intent(IN) :: is
+        integer,           intent(IN) :: n_given, rank_given
+        character(len=*),  intent(IN) :: routine
 
-        lats1D = reshape(lats,[n])
+        if (.not. is%grid) then
+            write(*,*) trim(routine)//":: Error: no latitude grid available."
+            write(*,*) "This state was initialized without one. Either call"
+            write(*,*) "insol_init(is,lats,...) with the grid, or use the point"
+            write(*,*) "interface calc_insol_day(is,insol,day,lat,time_bp)."
+            stop
+        end if
 
-        do q = 1, size(days,1)
-            insol1D = calc_insol_day_1D(days(q),lats1D,time_bp,S0,day_year,fldr)
-            insol(:,:,q) = reshape(insol1D,[size(lats,1),size(lats,2)])
-        end do 
+        if (rank_given == 2 .and. is%n2 == 0) then
+            write(*,*) trim(routine)//":: Error: state holds a 1D latitude grid,"
+            write(*,*) "but a 2D output array was given."
+            stop
+        end if
 
-        return 
+        if (rank_given == 1 .and. is%n2 /= 0) then
+            write(*,*) trim(routine)//":: Error: state holds a 2D latitude grid,"
+            write(*,*) "but a 1D output array was given."
+            stop
+        end if
 
-    end function calc_insol_days_2D
+        if (n_given /= is%n_lat) then
+            write(*,*) trim(routine)//":: Error: output array does not match the grid."
+            write(*,*) "grid points: ", is%n_lat
+            write(*,*) "output size: ", n_given
+            stop
+        end if
+
+        return
+
+    end subroutine check_grid
+
+    subroutine check_ndays(n_given,n_days,routine)
+
+        implicit none
+
+        integer,          intent(IN) :: n_given, n_days
+        character(len=*), intent(IN) :: routine
+
+        if (n_given /= n_days) then
+            write(*,*) trim(routine)//":: Error: day dimension of the output array"
+            write(*,*) "does not match the number of days requested."
+            write(*,*) "days requested:   ", n_days
+            write(*,*) "output dimension: ", n_given
+            stop
+        end if
+
+        return
+
+    end subroutine check_ndays
+
+    subroutine check_day_range(day_range,routine)
+
+        implicit none
+
+        integer,          intent(IN) :: day_range(2)
+        character(len=*), intent(IN) :: routine
+
+        if (day_range(2) .lt. day_range(1)) then
+            write(*,*) trim(routine)//":: Error: day_range must give a positive"
+            write(*,*) "total of days to calculate."
+            write(*,*) "day_range: ", day_range
+            stop
+        end if
+
+        return
+
+    end subroutine check_day_range
+
 
 ! =====================================================================================================
 
@@ -401,12 +678,35 @@ contains
         real(dp) :: solarm
 
         ! Local variables
-        real(dp) :: latrad, sinlat, coslat, sindec, cosdec
-        real(dp) :: denom, cosH0, H0, sinH0
+        real(dp) :: latrad
 
         latrad = lat*deg_to_rad
-        sinlat = sin(latrad)
-        coslat = cos(latrad)
+
+        solarm = calc_insol_internal(sin(latrad),cos(latrad),decl,dist2,S0)
+
+        return
+
+    end function calc_insol_day_internal
+
+    pure function calc_insol_internal(sinlat,coslat,decl,dist2,S0) result(solarm)
+        ! As calc_insol_day_internal, but taking the sine and cosine of the
+        ! latitude directly. For a fixed grid these are precomputed once at
+        ! initialization, which removes two transcendental evaluations per grid
+        ! point per day -- the dominant cost of this kernel.
+        !
+        implicit none
+
+        real(dp), intent(IN) :: sinlat      ! sin(latitude)
+        real(dp), intent(IN) :: coslat      ! cos(latitude)
+        real(dp), intent(IN) :: decl        ! Solar declination [radians]
+        real(dp), intent(IN) :: dist2       ! (a/r)^2
+        real(dp), intent(IN) :: S0          ! Solar constant [W/m2]
+        real(dp) :: solarm
+
+        ! Local variables
+        real(dp) :: sindec, cosdec
+        real(dp) :: denom, cosH0, H0, sinH0
+
         sindec = sin(decl)
         cosdec = cos(decl)
 
@@ -437,9 +737,9 @@ contains
 
         return
 
-    end function calc_insol_day_internal
+    end function calc_insol_internal
 
-    subroutine calc_orbital_par(time,per,ecc,obl,tper,zan,fldr)
+    subroutine calc_orbital_par(is,time,per,ecc,obl,tper,zan)
         !
         ! Calculates Earth's orbital parameters for the current time before 1950 (time)
         !
@@ -448,39 +748,54 @@ contains
         !
         ! Orbital parameters are loaded from a precalculated table of orbital values
         !
-        implicit none 
+        implicit none
 
-        real (dp) :: time, per, ecc, obl, tper, zan 
-        character(len=*), optional :: fldr 
+        type(insol_class), intent(IN)  :: is
+        real(dp),          intent(IN)  :: time
+        real(dp),          intent(OUT) :: per, ecc, obl, tper, zan
 
-        integer :: N1, N2 
-        real (dp) :: time_ka, ef 
-        real (dp) :: perm1, perm2 
+        integer :: N1, N2, NMID
+        real (dp) :: time_ka, ef
+        real (dp) :: perm1, perm2
         real (dp) :: ang, tgnu, sqecc, tian
         real (dp) :: days, e, epc
 
-        ! First, initialize global orbital parameter data if necessary
-        if ( .not. allocated(OPAR%time) ) call orbital_par_init(fldr)
+        ! Get current time in ka
+        time_ka = time*1d-3
 
-        ! Get current time in ka 
-        time_ka = time*1d-3 
+        ! The tables span -5 Ma to +1 Ma; extrapolating beyond them is
+        ! meaningless, and reading past the end used to run off the array.
+        if (time_ka .lt. is%time(1) .or. time_ka .gt. is%time(is%n_orbit)) then
+            write(*,*) "calc_orbital_par:: Error: time_bp outside the range of the"
+            write(*,*) "orbital parameter tables."
+            write(*,*) "time_bp [yr]:   ", time
+            write(*,*) "table range [yr]:", is%time(1)*1d3, is%time(is%n_orbit)*1d3
+            stop
+        end if
 
-        ! Determine indices bracketing current time
-        do N1 = 1, OPAR%n_orbit
-            if (OPAR%time(N1) .gt. time_ka) exit 
-        end do 
-        N1 = N1 - 1
-        N2 = N1 + 1 
+        ! Determine the indices bracketing the current time by bisection. The
+        ! table holds several thousand entries, so a linear scan from the start
+        ! costs more than the interpolation it feeds.
+        N1 = 1
+        N2 = is%n_orbit
+        do while (N2-N1 .gt. 1)
+            NMID = (N1+N2)/2
+            if (is%time(NMID) .gt. time_ka) then
+                N2 = NMID
+            else
+                N1 = NMID
+            end if
+        end do
 
         ! Get weighting of each index
-        ef = (time_ka-OPAR%time(N1)) / (OPAR%time(N2)-OPAR%time(N1))
-        
-        ! Get current eccentricity, obliquity and perihelion
-        ecc = (1.0_dp-ef)*OPAR%eccm(N1) + ef*OPAR%eccm(N2)
-        obl = (1.0_dp-ef)*OPAR%xobm(N1) + ef*OPAR%xobm(N2)
+        ef = (time_ka-is%time(N1)) / (is%time(N2)-is%time(N1))
 
-        perm1 = OPAR%perm(N1)
-        perm2 = OPAR%perm(N2)
+        ! Get current eccentricity, obliquity and perihelion
+        ecc = (1.0_dp-ef)*is%eccm(N1) + ef*is%eccm(N2)
+        obl = (1.0_dp-ef)*is%xobm(N1) + ef*is%xobm(N2)
+
+        perm1 = is%perm(N1)
+        perm2 = is%perm(N2)
         if (perm2 .lt. perm1) perm2 = perm2 + 360.0_dp
         
         per = (1.0_dp-ef)*perm1 + ef*perm2
@@ -516,65 +831,86 @@ contains
 
     end subroutine calc_orbital_par 
 
-    subroutine orbital_par_init(fldr)
-        ! Initialize the global module variable OPAR,
-        ! which holds the orbital parameters from -5 Ma => 1 Ma
-        ! Files should be located in subdirectory 'input' or 
-        ! the path 'fldr' should be given as an argument
+    subroutine load_orbital_table(is,fldr)
+        ! Load the orbital parameter tables (Laskar et al. 2004) covering
+        ! -5 Ma to +1 Ma into the state.
+        !
+        ! The two files are spliced into one record running from oldest to
+        ! youngest. Both begin at t = 0, so the past table is read in reverse
+        ! and its t = 0 row is overwritten by the identical first row of the
+        ! future table.
+        !
+        ! Files are read from subdirectory 'input' unless 'fldr' is given.
 
-        implicit none 
+        implicit none
 
-        character (len=*), optional :: fldr 
-        character (len=512) :: input_dir
-        character (len=512) :: filen, filep
-        integer :: n 
+        type(insol_class), intent(INOUT) :: is
+        character(len=*),  intent(IN), optional :: fldr
+
+        ! Local variables
+        integer, parameter :: n_past   = 5001      ! rows in LA2004.INSOLN.5Ma.txt
+        integer, parameter :: n_future = 1001      ! rows in LA2004.INSOLP.1Ma.txt
+
+        character(len=512) :: input_dir
+        character(len=512) :: filen, filep
+        integer :: n, unit, io
 
         ! Define the input directory where orbital parameter files are located
         input_dir = "input"
         if (present(fldr)) input_dir = trim(fldr)
 
         ! First make sure all vectors are deallocated
-        if (allocated(OPAR%time)) deallocate(OPAR%time)
-        if (allocated(OPAR%eccm)) deallocate(OPAR%eccm)
-        if (allocated(OPAR%perm)) deallocate(OPAR%perm)
-        if (allocated(OPAR%xobm)) deallocate(OPAR%xobm)
-        
+        if (allocated(is%time)) deallocate(is%time)
+        if (allocated(is%eccm)) deallocate(is%eccm)
+        if (allocated(is%perm)) deallocate(is%perm)
+        if (allocated(is%xobm)) deallocate(is%xobm)
+
         ! Allocate vectors to length of input parameter files
-        OPAR%n_orbit = 6001 
-        allocate(OPAR%time(OPAR%n_orbit),OPAR%eccm(OPAR%n_orbit))
-        allocate(OPAR%perm(OPAR%n_orbit),OPAR%xobm(OPAR%n_orbit))
+        is%n_orbit = n_past + n_future - 1
+        allocate(is%time(is%n_orbit),is%eccm(is%n_orbit))
+        allocate(is%perm(is%n_orbit),is%xobm(is%n_orbit))
 
         ! Specify file names of negative and positive time orbital parameters
         filen = trim(input_dir)//'/LA2004.INSOLN.5Ma.txt'
         filep = trim(input_dir)//'/LA2004.INSOLP.1Ma.txt'
 
         ! ==== PAST (NEGATIVE) TIMES ====
-        write(*,*) "Loading orbital parameters from file: "//trim(filen)
-        open (1,file=trim(filen))
+        open(newunit=unit,file=trim(filen),status="old",action="read",iostat=io)
+        if (io /= 0) then
+            write(*,*) "load_orbital_table:: Error: cannot open "//trim(filen)
+            write(*,*) "Pass the location of the orbital tables as insol_init(...,fldr=)."
+            stop
+        end if
 
-        do n=1,5001
-            read (1,*) OPAR%time(5001-n+1), OPAR%eccm(5001-n+1), OPAR%xobm(5001-n+1), OPAR%perm(5001-n+1)
-        enddo
+        do n = 1, n_past
+            read(unit,*) is%time(n_past-n+1), is%eccm(n_past-n+1), &
+                         is%xobm(n_past-n+1), is%perm(n_past-n+1)
+        end do
 
-        close (1)
+        close(unit)
 
         ! ==== FUTURE (POSITIVE) TIMES ====
-        write(*,*) "Loading orbital parameters from file: "//trim(filep)
-        open (1,file=trim(filep))
+        open(newunit=unit,file=trim(filep),status="old",action="read",iostat=io)
+        if (io /= 0) then
+            write(*,*) "load_orbital_table:: Error: cannot open "//trim(filep)
+            write(*,*) "Pass the location of the orbital tables as insol_init(...,fldr=)."
+            stop
+        end if
 
-        do n=1,1001
-            read (1,*) OPAR%time(5000+n), OPAR%eccm(5000+n), OPAR%xobm(5000+n), OPAR%perm(5000+n)
-        enddo
+        do n = 1, n_future
+            read(unit,*) is%time(n_past-1+n), is%eccm(n_past-1+n), &
+                         is%xobm(n_past-1+n), is%perm(n_past-1+n)
+        end do
 
-        close (1)
+        close(unit)
 
-        ! Convert from radians to degrees      
-        OPAR%xobm = OPAR%xobm * 180.0/pi
-        OPAR%perm = OPAR%perm * 180.0/pi
+        ! Convert from radians to degrees
+        is%xobm = is%xobm * 180.0_dp/pi
+        is%perm = is%perm * 180.0_dp/pi
 
         return
 
-    end subroutine orbital_par_init 
+    end subroutine load_orbital_table
 
     subroutine ORBIT(ECC,XOBCH,TPERI,ZAVEXPE,  &
                      PCLOCK,PYTIME,PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
