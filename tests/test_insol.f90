@@ -37,17 +37,20 @@ program test_insol
     integer :: n_pass = 0
     integer :: n_fail = 0
 
-    ! Shared state for the point queries. Grid-based checks build their own.
-    type(insol_class) :: is
+    ! Shared states for point queries, one per supported calendar. Grid-based
+    ! checks build their own.
+    type(insol_class) :: is, is365
 
     write(*,*)
     write(*,*) "=============================================="
     write(*,*) " insol regression tests"
     write(*,*) "=============================================="
 
-    call insol_init(is,fldr=fldr,S0=S0_ref)
+    call insol_init(is,   fldr=fldr,S0=S0_ref)
+    call insol_init(is365,fldr=fldr,S0=S0_ref,day_year=365)
 
     call test_reference_values()
+    call test_equinox_convention()
     call test_interface_consistency()
     call test_non_negative()
     call test_polar_night()
@@ -58,6 +61,7 @@ program test_insol
     write(*,*)
 
     call insol_end(is)
+    call insol_end(is365)
 
     if (n_fail > 0) then
         write(*,*) "FAILED"
@@ -79,7 +83,7 @@ contains
         character(len=512) :: line
         real(dp) :: time_bp, lat, insol_ref, coszm_ref, insol
         real(dp) :: err, err_max
-        integer  :: day, io, n, unit
+        integer  :: day, day_year, io, n, unit
 
         err_max = 0.0_dp
         n       = 0
@@ -96,9 +100,13 @@ contains
             if (len_trim(line) == 0) cycle
             if (line(1:1) == '#') cycle
 
-            read(line,*) time_bp, lat, day, insol_ref, coszm_ref
+            read(line,*) time_bp, day_year, lat, day, insol_ref, coszm_ref
 
-            call calc_insol_day(is,insol,day,lat,time_bp)
+            if (day_year == 365) then
+                call calc_insol_day(is365,insol,day,lat,time_bp)
+            else
+                call calc_insol_day(is,insol,day,lat,time_bp)
+            end if
 
             err = abs(insol - insol_ref)
             if (err > err_max) err_max = err
@@ -116,6 +124,69 @@ contains
                    err_max, tol_ref, "max |insol - reference| [W/m2]")
 
     end subroutine test_reference_values
+
+    subroutine test_equinox_convention()
+        ! At an equinox the sun is over the equator, so insolation is symmetric
+        ! about it. The solution places the vernal equinox at a fixed fractional
+        ! day -- 80.5 of a 360-day year, 79.5 of a 365-day year -- so the
+        ! hemispheric asymmetry must change sign between the two integer days
+        ! that straddle it.
+        !
+        ! This is what pins the vernal-equinox convention down: an error in it
+        ! shifts the seasons relative to the orbit while leaving both the annual
+        ! mean and the reference values self-consistent.
+
+        implicit none
+
+        real(dp) :: asym_before, asym_after
+
+        call calc_asymmetry(is,   80, asym_before)
+        call calc_asymmetry(is,   81, asym_after)
+        call check_straddle("equinox convention (360-day year)", &
+                            asym_before, asym_after)
+
+        call calc_asymmetry(is365, 79, asym_before)
+        call calc_asymmetry(is365, 80, asym_after)
+        call check_straddle("equinox convention (365-day year)", &
+                            asym_before, asym_after)
+
+    end subroutine test_equinox_convention
+
+    subroutine calc_asymmetry(isl,day,asym)
+        ! Difference in insolation between 45N and 45S on a given day.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: isl
+        integer,           intent(IN)  :: day
+        real(dp),          intent(OUT) :: asym
+
+        ! Local variables
+        real(dp) :: insol_n, insol_s
+
+        call calc_insol_day(isl,insol_n,day, 45.0_dp,0.0_dp)
+        call calc_insol_day(isl,insol_s,day,-45.0_dp,0.0_dp)
+
+        asym = insol_n - insol_s
+
+    end subroutine calc_asymmetry
+
+    subroutine check_straddle(name,before,after)
+        ! Pass if the two values bracket a sign change.
+
+        implicit none
+
+        character(len=*), intent(IN) :: name
+        real(dp),         intent(IN) :: before, after
+
+        if (before*after < 0.0_dp) then
+            call pass(name)
+        else
+            call fail(name, "asymmetry does not change sign across the equinox: "// &
+                            trim(rtoa(before))//" then "//trim(rtoa(after)))
+        end if
+
+    end subroutine check_straddle
 
     subroutine test_interface_consistency()
         ! The point, vector and 2D interfaces must return the same value for the

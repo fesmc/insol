@@ -407,11 +407,74 @@ contains
         is%day_year = day_year_default
         if (present(day_year)) is%day_year = day_year
 
+        call check_day_year(is%day_year)
+
         call load_orbital_table(is,fldr)
 
         return
 
     end subroutine insol_config
+
+    function calc_day_vernal_equinox(day_year) result(tverex)
+        ! Day of the vernal equinox, counted from the start of the year, for
+        ! each supported calendar.
+        !
+        ! The orbital solution pins the vernal equinox to March 21, 12:00 GMT.
+        ! Which day number that is depends only on the lengths of January and
+        ! February in the calendar being used, so `day_year` selects a labelling
+        ! of the orbit rather than changing the orbit itself.
+
+        implicit none
+
+        integer, intent(IN) :: day_year
+        real(dp) :: tverex
+
+        select case (day_year)
+
+            case (360)
+                tverex = 80.5_dp        ! 30 + 30 + 20.5
+
+            case (365)
+                tverex = 79.5_dp        ! 31 + 28 + 20.5
+
+            case (366)
+                tverex = 80.5_dp        ! 31 + 29 + 20.5
+
+            case default
+                ! Unreachable: insol_config rejects other values at init.
+                tverex = 0.0_dp
+
+        end select
+
+        return
+
+    end function calc_day_vernal_equinox
+
+    subroutine check_day_year(day_year)
+        ! Only calendars whose vernal equinox day is defined are supported.
+        ! Silently accepting others would shift the seasons relative to the
+        ! orbit, which is how this argument used to behave.
+
+        implicit none
+
+        integer, intent(IN) :: day_year
+
+        select case (day_year)
+
+            case (360, 365, 366)
+                ! Supported
+
+            case default
+                write(*,*) "insol_init:: Error: unsupported day_year."
+                write(*,*) "day_year: ", day_year
+                write(*,*) "Supported values are 360, 365 and 366."
+                error stop 1
+
+        end select
+
+        return
+
+    end subroutine check_day_year
 
     subroutine insol_set_grid(is,lats,n1,n2)
         ! Precompute and store the geometry of a latitude grid. `lats` arrives
@@ -549,26 +612,26 @@ contains
             write(*,*) "This state was initialized without one. Either call"
             write(*,*) "insol_init(is,lats,...) with the grid, or use the point"
             write(*,*) "interface calc_insol_day(is,insol,day,lat,time_bp)."
-            stop
+            error stop 1
         end if
 
         if (rank_given == 2 .and. is%n2 == 0) then
             write(*,*) trim(routine)//":: Error: state holds a 1D latitude grid,"
             write(*,*) "but a 2D output array was given."
-            stop
+            error stop 1
         end if
 
         if (rank_given == 1 .and. is%n2 /= 0) then
             write(*,*) trim(routine)//":: Error: state holds a 2D latitude grid,"
             write(*,*) "but a 1D output array was given."
-            stop
+            error stop 1
         end if
 
         if (n_given /= is%n_lat) then
             write(*,*) trim(routine)//":: Error: output array does not match the grid."
             write(*,*) "grid points: ", is%n_lat
             write(*,*) "output size: ", n_given
-            stop
+            error stop 1
         end if
 
         return
@@ -587,7 +650,7 @@ contains
             write(*,*) "does not match the number of days requested."
             write(*,*) "days requested:   ", n_days
             write(*,*) "output dimension: ", n_given
-            stop
+            error stop 1
         end if
 
         return
@@ -605,7 +668,7 @@ contains
             write(*,*) trim(routine)//":: Error: day_range must give a positive"
             write(*,*) "total of days to calculate."
             write(*,*) "day_range: ", day_range
-            stop
+            error stop 1
         end if
 
         return
@@ -640,7 +703,7 @@ contains
         PCLOCK = 0.0_dp
 
         call ORBIT(ECC,XOBCH,TPERI,ZAVEXPE, &
-                   PCLOCK,PYTIME,PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
+                   PCLOCK,PYTIME,dble(day_max),PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
 
         ! PZEN1 = sin(declination); PDISSE = (a/r)^2
         decl  = asin(max(-1.0_dp,min(1.0_dp,PZEN1)))
@@ -759,6 +822,7 @@ contains
         real (dp) :: perm1, perm2
         real (dp) :: ang, tgnu, sqecc, tian
         real (dp) :: days, e, epc
+        real (dp) :: day_year
 
         ! Get current time in ka
         time_ka = time*1d-3
@@ -770,7 +834,7 @@ contains
             write(*,*) "orbital parameter tables."
             write(*,*) "time_bp [yr]:   ", time
             write(*,*) "table range [yr]:", is%time(1)*1d3, is%time(is%n_orbit)*1d3
-            stop
+            error stop 1
         end if
 
         ! Determine the indices bracketing the current time by bisection. The
@@ -816,18 +880,19 @@ contains
         !   time angle in radians of perihelion from vernal equinox
 
         tian = e - ecc*sin(e)
-        days = tian*180.0_dp/pi                    !   360 day year only
-        if (days .lt. 0.0_dp) days = days+360.0_dp !   days from ver.eq. to perh.
+        day_year = real(is%day_year,dp)
+
+        days = tian/(2.0_dp*pi)*day_year           !   days from ver.eq. to perh.
+        if (days .lt. 0.0_dp) days = days+day_year
 
         !   time in days from begin of year: vernal equinox fixed at 3/21, 12 GMT
-        !    = 80.5 days in 360 day year
 
-        tper = days+80.5_dp
-        if (tper .gt. 360.0_dp) tper = tper-360.0_dp
+        tper = days+calc_day_vernal_equinox(is%day_year)
+        if (tper .gt. day_year) tper = tper-day_year
 
         epc = ecc*100.0_dp
-      
-        return 
+
+        return
 
     end subroutine calc_orbital_par 
 
@@ -879,7 +944,7 @@ contains
         if (io /= 0) then
             write(*,*) "load_orbital_table:: Error: cannot open "//trim(filen)
             write(*,*) "Pass the location of the orbital tables as insol_init(...,fldr=)."
-            stop
+            error stop 1
         end if
 
         do n = 1, n_past
@@ -894,7 +959,7 @@ contains
         if (io /= 0) then
             write(*,*) "load_orbital_table:: Error: cannot open "//trim(filep)
             write(*,*) "Pass the location of the orbital tables as insol_init(...,fldr=)."
-            stop
+            error stop 1
         end if
 
         do n = 1, n_future
@@ -913,7 +978,7 @@ contains
     end subroutine load_orbital_table
 
     subroutine ORBIT(ECC,XOBCH,TPERI,ZAVEXPE,  &
-                     PCLOCK,PYTIME,PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
+                     PCLOCK,PYTIME,TTROP,PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
     !   *ORBIT* - FOR SOLAR ORBITAL PARAMETERS.
 !
 !       J.F.GELEYN     E.C.M.W.F.     03/06/82.
@@ -963,10 +1028,14 @@ contains
 !
         real (dp), parameter :: ZRAE = 0.1277e-02_dp   
 
-        real(dp) :: TTROP 
 
         real (dp) :: BTIME, ECC, XOBCH, TPERI, ZAVEXPE
         real (dp) :: PCLOCK, PYTIME, PDISSE, PZEN1, PZEN2, PZEN3, PRAE
+
+        ! Length of the tropical year, in the same day units as TPERI and
+        ! PYTIME. Supplied by the caller rather than fixed at 360 so that the
+        ! solution can be labelled on a 365- or 366-day calendar.
+        real (dp) :: TTROP
 
         real (dp) :: ZCLOCK, ZYTIME
 
@@ -979,7 +1048,6 @@ contains
 
         ZCLOCK = PCLOCK
         ZYTIME = PYTIME
-        TTROP  = 360.0_dp     !       TROPICAL YEAR
 
 !       DAY OF VERNAL EQUINOX: DEFINED ON 21. OF MARCH, 12.00 GMT
 !       (BEGIN OF YEAR: 01. OF JANUARY, 0.00 GMT: ZYTIME=0.0, THEREAFTER
@@ -1021,7 +1089,7 @@ contains
             if (niter .ge. 30) then 
                 write(*,*) ' SUBROUTINE *ORBIT* - eccentri!   anomaly not found!'
                 write(*,*) ' ERROR IN   *ORBIT* -- STOP'
-                stop
+                error stop 1
             end if 
 
             niter = niter+1

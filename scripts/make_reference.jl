@@ -19,8 +19,13 @@
 using Printf
 
 const S0_DEFAULT = 1365.0
-const DAY_YEAR   = 360          # tropical year length assumed by the solution
-const TVEREX     = 80.5         # day of vernal equinox in a 360-day year
+
+# Day of the vernal equinox (March 21, 12:00 GMT) counted from the start of the
+# year, per calendar. It depends only on the lengths of January and February,
+# so `day_year` selects a labelling of the orbit, not a different orbit.
+const TVEREX = Dict(360 => 80.5,    # 30 + 30 + 20.5
+                    365 => 79.5,    # 31 + 28 + 20.5
+                    366 => 80.5)    # 31 + 29 + 20.5
 
 "Orbital element table from Laskar et al. (2004): time in ka, angles in degrees."
 struct OrbitTable
@@ -68,7 +73,7 @@ Interpolate the orbital elements to `time_bp` (years before 1950) and derive the
 time of perihelion. Returns `(ecc, obl, per, tper, zavexpe)` with angles in
 degrees except `zavexpe` (radians) and `tper` (days from start of year).
 """
-function orbital_par(tab::OrbitTable, time_bp)
+function orbital_par(tab::OrbitTable, time_bp, day_year)
     t_ka = time_bp * 1e-3
     (t_ka < first(tab.time) || t_ka > last(tab.time)) &&
         error("time_bp = $time_bp ka outside orbital table range")
@@ -93,8 +98,8 @@ function orbital_par(tab::OrbitTable, time_bp)
     zavexpe = deg2rad(ang)
     ecc_anom = 2 * atan(sqrt((1 - ecc) / (1 + ecc)) * tan(zavexpe / 2))
     mean_anom = ecc_anom - ecc * sin(ecc_anom)          # Kepler's equation
-    days = mod(rad2deg(mean_anom), 360.0)                # 360-day year only
-    tper = mod(days + TVEREX, 360.0)
+    days = mod(mean_anom/(2pi)*day_year, day_year)
+    tper = mod(days + TVEREX[day_year], day_year)
 
     return ecc, obl, per, tper, zavexpe
 end
@@ -106,11 +111,11 @@ Solar declination [rad] and the inverse-square distance factor (a/r)^2 for a
 given day of the year. Declination is held fixed across the day, matching the
 convention of the library.
 """
-function solar_geometry(day, ecc, obl, tper, zavexpe)
-    ytime = day / DAY_YEAR * 2pi
+function solar_geometry(day, ecc, obl, tper, zavexpe, day_year)
+    ytime = day / day_year * 2pi
 
     # Solve Kepler's equation for the eccentric anomaly by Newton iteration.
-    m = ytime - 2pi * tper / DAY_YEAR
+    m = ytime - 2pi * tper / day_year
     e = m
     for _ in 1:100
         de = (m + ecc * (sin(e) - e * cos(e))) / (1 - ecc * cos(e)) - e
@@ -181,7 +186,11 @@ function main()
     # spanning the full range of the orbital tables.
     times = [0.0, -6000.0, -21000.0, -115000.0, -1.0e6, -4.9e6, 5.0e5, 1.0e6]
     lats  = [-90.0, -65.0, -45.0, -23.5, 0.0, 23.5, 45.0, 65.0, 90.0]
-    days  = [1, 46, 80, 105, 172, 200, 264, 300, 355, 360]
+
+    # Both supported calendar lengths, so the reference also pins down the
+    # vernal equinox convention for each.
+    daysets = Dict(360 => [1, 46, 80, 105, 172, 200, 264, 300, 355, 360],
+                   365 => [1, 46, 79, 105, 172, 200, 264, 300, 355, 365])
 
     open(outfile, "w") do io
         println(io, "# Reference daily-mean insolation and mean cosine zenith angle.")
@@ -189,26 +198,28 @@ function main()
         println(io, "# implementation of the Berger (1978) analytic daily integral.")
         println(io, "# Orbital elements: Laskar et al. (2004), tables in input/.")
         println(io, "#")
-        @printf(io, "# S0 = %.4f W/m2, day_year = %d\n", S0_DEFAULT, DAY_YEAR)
+        @printf(io, "# S0 = %.4f W/m2\n", S0_DEFAULT)
         println(io, "#")
-        @printf(io, "#%11s %10s %6s %22s %22s\n",
-                "time_bp", "lat", "day", "insol", "coszm")
+        @printf(io, "#%11s %9s %10s %6s %22s %22s\n",
+                "time_bp", "day_year", "lat", "day", "insol", "coszm")
 
-        for time_bp in times
-            ecc, obl, per, tper, zavexpe = orbital_par(tab, time_bp)
-            for day in days
-                decl, dist2 = solar_geometry(day, ecc, obl, tper, zavexpe)
-                for lat in lats
-                    q  = insol_day(lat, decl, dist2)
-                    cz = coszm_day(lat, decl, dist2)
-                    @printf(io, "%12.1f %10.4f %6d %22.14e %22.14e\n",
-                            time_bp, lat, day, q, cz)
+        for day_year in sort(collect(keys(daysets)))
+            for time_bp in times
+                ecc, obl, per, tper, zavexpe = orbital_par(tab, time_bp, day_year)
+                for day in daysets[day_year]
+                    decl, dist2 = solar_geometry(day, ecc, obl, tper, zavexpe, day_year)
+                    for lat in lats
+                        q  = insol_day(lat, decl, dist2)
+                        cz = coszm_day(lat, decl, dist2)
+                        @printf(io, "%12.1f %9d %10.4f %6d %22.14e %22.14e\n",
+                                time_bp, day_year, lat, day, q, cz)
+                    end
                 end
             end
         end
     end
 
-    n = length(times) * length(days) * length(lats)
+    n = length(times) * sum(length(d) for d in values(daysets)) * length(lats)
     println("Wrote $n reference values to $outfile")
 end
 
