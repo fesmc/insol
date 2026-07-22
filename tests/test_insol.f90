@@ -20,16 +20,17 @@ program test_insol
 
     implicit none
 
-    integer, parameter :: dp = kind(1.0d0)
     real(dp), parameter :: pi = 2.0_dp*acos(0.0_dp)
 
     ! Solar constant and year length assumed by the reference values.
     real(dp), parameter :: S0_ref = 1365.0_dp
 
     ! Tolerance on the reference comparison. The closed-form daily integral is
-    ! exact, so agreement should be limited only by round-off; anything larger
-    ! indicates a quadrature or interpolation error in the library.
-    real(dp), parameter :: tol_ref = 1.0e-6_dp
+    ! exact, so agreement is limited only by round-off in the kind the interface
+    ! returns; anything larger indicates a quadrature or interpolation error in
+    ! the library. Insolation reaches ~560 W/m2, so one single-precision ulp is
+    ! ~7e-5 -- hence the looser bound when built with -DINSOL_SP.
+    real(dp), parameter :: tol_ref = merge(1.0e-3_dp, 1.0e-6_dp, wp == sp)
 
     character(len=*), parameter :: fldr     = "input"
     character(len=*), parameter :: ref_file = "tests/reference/insol_reference.txt"
@@ -81,7 +82,8 @@ contains
         implicit none
 
         character(len=512) :: line
-        real(dp) :: time_bp, lat, insol_ref, coszm_ref, insol
+        real(dp) :: time_bp, lat, insol_ref, coszm_ref
+        real(wp) :: insol
         real(dp) :: err, err_max
         integer  :: day, day_year, io, n, unit
 
@@ -162,7 +164,7 @@ contains
         real(dp),          intent(OUT) :: asym
 
         ! Local variables
-        real(dp) :: insol_n, insol_s
+        real(wp) :: insol_n, insol_s
 
         call calc_insol_day(isl,insol_n,day, 45.0_dp,0.0_dp)
         call calc_insol_day(isl,insol_s,day,-45.0_dp,0.0_dp)
@@ -201,9 +203,11 @@ contains
 
         integer,  parameter :: nlat = 91
         integer,  parameter :: nx = 13, ny = 7
-        real(dp) :: lats(nlat), insol_1D(nlat)
-        real(dp) :: lats2D(nx,ny), insol_2D(nx,ny)
-        real(dp) :: insol_pt
+        real(dp) :: lats(nlat)
+        real(wp) :: insol_1D(nlat)
+        real(dp) :: lats2D(nx,ny)
+        real(wp) :: insol_2D(nx,ny)
+        real(wp) :: insol_pt
         real(dp) :: err_1D, err_2D
         integer  :: i, j, day
         type(insol_class) :: is1D, is2D
@@ -266,7 +270,8 @@ contains
         implicit none
 
         integer,  parameter :: nlat = 181
-        real(dp) :: lats(nlat), insol(nlat)
+        real(dp) :: lats(nlat)
+        real(wp) :: insol(nlat)
         real(dp) :: worst_low, worst_high
         integer  :: i, day
         type(insol_class) :: isg
@@ -300,19 +305,19 @@ contains
 
         implicit none
 
-        real(dp) :: insol_n, insol_s
+        real(wp) :: insol_n, insol_s
 
         ! Day 355 is close to the December solstice in a 360-day year, with the
         ! north pole in polar night and the south pole in polar day.
         call calc_insol_day(is, insol_n, 355,  90.0_dp, 0.0_dp)
         call calc_insol_day(is, insol_s, 355, -90.0_dp, 0.0_dp)
 
-        call check("polar night (90N, day 355)", insol_n, 0.0_dp, "insolation [W/m2]")
+        call check("polar night (90N, day 355)", real(insol_n,dp), 0.0_dp, "insolation [W/m2]")
 
         if (insol_s > 400.0_dp) then
             call pass("polar day (90S, day 355)")
         else
-            call fail("polar day (90S, day 355)", "expected > 400 W/m2, got "//trim(rtoa(insol_s)))
+            call fail("polar day (90S, day 355)", "expected > 400 W/m2, got "//trim(rtoa(real(insol_s,dp))))
         end if
 
     end subroutine test_polar_night
@@ -329,7 +334,8 @@ contains
         integer,  parameter :: nday = 360
         real(dp), parameter :: ecc_1950 = 0.0167023622549_dp   ! from LA2004 at t=0
 
-        real(dp) :: mu, lats(nmu), insol(nmu)
+        real(dp) :: mu, lats(nmu)
+        real(wp) :: insol(nmu)
         real(dp) :: total, mean, expected, rel_err
         integer  :: i, day
         type(insol_class) :: isg

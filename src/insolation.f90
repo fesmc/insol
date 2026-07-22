@@ -22,7 +22,7 @@
 
 module insolation
 
-    use insol_defs, only : dp, wp, pi, deg_to_rad => degrees_to_radians, &
+    use insol_defs, only : sp, dp, wp, pi, deg_to_rad => degrees_to_radians, &
                            S0_default, day_year_default
 
     implicit none
@@ -83,6 +83,9 @@ module insolation
     end interface
 
     private
+    ! Re-exported so a caller needs only `use insolation` to declare variables
+    ! of the kind the interface exchanges.
+    public :: sp, dp, wp
     public :: insol_class
     public :: insol_init
     public :: insol_end

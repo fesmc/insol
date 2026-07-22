@@ -1,0 +1,68 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gfortran
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran
+
+      # The core library and its tests need nothing but a Fortran compiler, so
+      # the Makefile is assembled here directly from the template rather than by
+      # installing configme. `make test-dni` is not exercised: that half needs
+      # netCDF and fesm-utils.
+      - name: Configure
+        run: |
+          python3 - <<'EOF'
+          fragment = "\n".join([
+              "FC = gfortran",
+              "FFLAGS = -ffree-line-length-none -I$(objdir) -J$(objdir)",
+              "FFLAGS_OPENMP = -fopenmp",
+              "DFLAGS_NODEBUG = -O2",
+              "DFLAGS_DEBUG = -w -g -ffpe-trap=invalid,zero,overflow -fbacktrace -fcheck=all",
+              "DFLAGS_PROFILE = -O2 -pg",
+              "LFLAGS_EXTRA =",
+              "INC_NC =",
+              "LIB_NC =",
+          ])
+          template = open("config/Makefile").read()
+          open("Makefile", "w").write(
+              template.replace("<COMPILER_CONFIGURATION>", fragment))
+          EOF
+
+      - name: Run tests
+        run: make check
+
+      - name: Run tests with debugging checks enabled
+        run: |
+          make clean
+          make check debug=1
+
+      # wp is a compile-time switch, so the single-precision interface is a
+      # separate build that has to be exercised on its own.
+      - name: Run tests with the single-precision interface
+        run: |
+          make clean
+          make check FFLAGS="-ffree-line-length-none -cpp -DINSOL_SP -Ilibinsol/include -Jlibinsol/include"
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      # The reference values are committed, but they are only worth anything if
+      # the generator still reproduces them.
+      - name: Check reference values are reproducible
+        run: |
+          julia scripts/make_reference.jl
+          git diff --exit-code tests/reference/insol_reference.txt
