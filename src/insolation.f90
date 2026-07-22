@@ -22,15 +22,12 @@
 
 module insolation
 
-    use interp1D 
+    use insol_defs, only : dp, wp, pi, deg_to_rad => degrees_to_radians
+    use interp1D
 
-    implicit none 
+    implicit none
 
-    integer,  parameter :: dp  = kind(1.0d0)
 
-    real (dp), parameter :: pi = 2.d0*acos(0.d0)
-    real (dp), parameter :: deg_to_rad = pi/180.0_dp
-    
     type orbit_class
         integer :: n_orbit, n_lat
         real (dp), dimension(:), allocatable :: time, eccm, perm, xobm
