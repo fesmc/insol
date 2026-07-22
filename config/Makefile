@@ -43,7 +43,6 @@ endif
 
 # Core library: orbital solution and insolation. No external dependencies.
 insol_core = $(objdir)/insol_defs.o \
-             $(objdir)/interp1D.o \
              $(objdir)/insolation.o
 
 # Irradiance: surface irradiance decomposition (DNI/DHI) for the renewable
@@ -55,10 +54,7 @@ insol_libs = $(insol_core) $(insol_irradiance)
 $(objdir)/insol_defs.o: $(srcdir)/insol_defs.F90
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
-$(objdir)/interp1D.o: $(srcdir)/interp1D.f90
-	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
-
-$(objdir)/insolation.o: $(srcdir)/insolation.f90 $(objdir)/insol_defs.o $(objdir)/interp1D.o
+$(objdir)/insolation.o: $(srcdir)/insolation.f90 $(objdir)/insol_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
 $(objdir)/irradiance.o: $(srcdir)/irradiance.f90

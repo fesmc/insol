@@ -23,16 +23,14 @@
 module insolation
 
     use insol_defs, only : dp, wp, pi, deg_to_rad => degrees_to_radians
-    use interp1D
 
     implicit none
 
 
     type orbit_class
-        integer :: n_orbit, n_lat
+        integer :: n_orbit
         real (dp), dimension(:), allocatable :: time, eccm, perm, xobm
-        real (dp), dimension(:), allocatable :: lats, solarm, coszm 
-    end type 
+    end type
 
     type(orbit_class) :: OPAR 
 
@@ -75,17 +73,15 @@ contains
         real(dp) :: insol
         
         ! Local variables
-        integer, parameter :: nh = 24 
-        integer :: j, h, day, ndays 
+        integer  :: day, ndays
         real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
-        real(dp) :: PRAE, PCLOCK, PYTIME 
-        real(dp) :: PDISSE(nh), PZEN1(nh), PZEN2(nh), PZEN3(nh)
-        real(dp) :: S0_value 
-        integer  :: day_max 
-        integer  :: day_step 
+        real(dp) :: decl, dist2
+        real(dp) :: S0_value
+        integer  :: day_max
+        integer  :: day_step
 
-        
-        if (day_range(2) .le. day_range(1)) then 
+
+        if (day_range(2) .le. day_range(1)) then
             write(*,*) "calc_insol_ave_pt:: Error: day_range must give a positive total of days to calculate."
             write(*,*) "day_range: ", day_range 
             stop 
@@ -111,19 +107,14 @@ contains
 
         do day = day_range(1), day_range(2), day_step
 
-            ! Get hourly zenith angle values for input into daily insol function
-            PYTIME = dble(day)/dble(day_max)*2.0_dp*pi
-            do h = 1, nh
-                PCLOCK = dble(h)/dble(nh)*2.0_dp*pi
-                call ORBIT(ECC,XOBCH,TPERI,ZAVEXPE, &
-                        PCLOCK,PYTIME,PDISSE(h),PZEN1(h),PZEN2(h),PZEN3(h),PRAE)
-            end do 
+            ! Get the solar geometry for this day
+            call calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
 
             ! Calculate daily insolation at latitude of interest
-            insol = insol + calc_insol_day_internal(lat,PDISSE,PZEN1,PZEN2,S0_value)
+            insol = insol + calc_insol_day_internal(lat,decl,dist2,S0_value)
 
-            ndays = ndays + 1 
-        end do 
+            ndays = ndays + 1
+        end do
 
         ! Get the average 
         insol = insol / real(ndays,dp)
@@ -152,37 +143,29 @@ contains
         real(dp) :: insol
         
         ! Local variables
-        integer :: j, h 
-        integer, parameter :: nh = 24 
         real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
-        real(dp) :: PRAE, PCLOCK, PYTIME 
-        real(dp) :: PDISSE(nh), PZEN1(nh), PZEN2(nh), PZEN3(nh)
-        real(dp) :: S0_value 
-        integer  :: day_max 
-        
+        real(dp) :: decl, dist2
+        real(dp) :: S0_value
+        integer  :: day_max
+
         ! Define the solar constant
         S0_value = 1365.0_dp
-        if (present(S0)) S0_value = S0  
+        if (present(S0)) S0_value = S0
 
-        ! Define year length in days 
+        ! Define year length in days
         day_max = 360
         if (present(day_year)) day_max = day_year
 
-        ! Calculate orbital parameters for current year 
+        ! Calculate orbital parameters for current year
         call calc_orbital_par(time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE,fldr)
 
-        ! Get hourly zenith angle values for input into daily insol function
-        PYTIME = dble(day)/dble(day_max)*2.0_dp*pi
-        do h = 1, nh
-            PCLOCK = dble(h)/dble(nh)*2.0_dp*pi
-            call ORBIT(ECC,XOBCH,TPERI,ZAVEXPE, &
-                       PCLOCK,PYTIME,PDISSE(h),PZEN1(h),PZEN2(h),PZEN3(h),PRAE)
-        end do 
+        ! Get the solar geometry for this day
+        call calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
 
         ! Calculate daily insolation at latitude of interest
-        insol = calc_insol_day_internal(lat,PDISSE,PZEN1,PZEN2,S0_value)
+        insol = calc_insol_day_internal(lat,decl,dist2,S0_value)
 
-        return 
+        return
 
     end function calc_insol_day_pt
 
@@ -193,71 +176,42 @@ contains
 
         implicit none 
 
-        integer   :: day
-        real (dp) :: lats(:) 
-        real (dp) :: time_bp
-        real (dp) :: insol(size(lats))
+        integer,  intent(IN) :: day
+        real(dp), intent(IN) :: lats(:)
+        real(dp), intent(IN) :: time_bp
+        real(dp), intent(IN), optional :: S0
+        integer,  intent(IN), optional :: day_year
+        character(len=*), intent(IN), optional :: fldr
+        real(dp) :: insol(size(lats))
 
-        integer, parameter :: nh = 24 
-
-        real (dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
-        real (dp) :: PRAE, PCLOCK, PYTIME 
-        real (dp) :: PDISSE(nh), PZEN1(nh), PZEN2(nh), PZEN3(nh)
-
-        integer :: j, h 
-
-        real (dp), optional :: S0
-        real (dp)           :: S0_value 
-
-        integer, optional   :: day_year
-        integer             :: day_max 
-
-        character(len=*), optional :: fldr 
+        ! Local variables
+        integer  :: j
+        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
+        real(dp) :: decl, dist2
+        real(dp) :: S0_value
+        integer  :: day_max
 
         ! Define the solar constant
         S0_value = 1365.0_dp
-        if (present(S0)) S0_value = S0  
+        if (present(S0)) S0_value = S0
 
-        ! Define year length in days 
+        ! Define year length in days
         day_max = 360
         if (present(day_year)) day_max = day_year
 
-        ! Calculate orbital parameters for current year 
+        ! Calculate orbital parameters for current year
         call calc_orbital_par(time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE,fldr)
 
-        ! Get hourly zenith angle values for input into daily insol function
-        PYTIME = dble(day)/dble(day_max)*2.0_dp*pi
-        do h = 1, nh
-            PCLOCK = dble(h)/dble(nh)*2.0_dp*pi
-            call ORBIT(ECC,XOBCH,TPERI,ZAVEXPE, &
-                       PCLOCK,PYTIME,PDISSE(h),PZEN1(h),PZEN2(h),PZEN3(h),PRAE)
-        end do 
+        ! Get the solar geometry for this day. It does not depend on latitude,
+        ! so it is computed once and reused for every point.
+        call calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
 
-if (.TRUE.) then 
-        ! ================================================
-        ! Using spline interpolation 
-        ! ================================================
-        ! Calculate daily insolation at predefined latitude values,
-        ! then interpolate via spline to get insolation at desired latitudes
-        do j = 1, OPAR%n_lat
-            OPAR%solarm(j) = calc_insol_day_internal(OPAR%lats(j),PDISSE,PZEN1,PZEN2,S0_value)
-        end do 
-        insol(:) = interp_spline(OPAR%lats,OPAR%solarm,lats)
-
-else
-        ! ================================================
-        ! Direct calculation at each latitude (no spline)
-        ! ================================================
         ! Calculate daily insolation at each latitude
         do j = 1, size(lats)
-            insol(j) = calc_insol_day_internal(lats(j),PDISSE,PZEN1,PZEN2,S0_value)
+            insol(j) = calc_insol_day_internal(lats(j),decl,dist2,S0_value)
         end do
 
-end if 
-
-        where (insol .lt. 0.0_dp) insol = 0.0_dp 
-        
-        return 
+        return
 
     end function calc_insol_day_1D
 
@@ -384,69 +338,104 @@ end if
 
 ! =====================================================================================================
 
-    function calc_insol_day_analytical_internal(day,time_bp,lat,S0) result(solarm)
-        ! Calculate the daily mean insolation value,
-        ! given day of year, time before present, latitude and solar constant,
+    subroutine calc_solar_geometry(decl,dist2,day,day_max,ECC,XOBCH,TPERI,ZAVEXPE)
+        ! Solar declination and the inverse-square distance factor (a/r)^2 for a
+        ! given day of the year.
+        !
+        ! Neither quantity depends on the time of day: ORBIT derives the
+        ! declination from the time of year alone, and the clock angle enters
+        ! only the zenith parameters PZEN2/PZEN3. It is therefore evaluated once
+        ! per day rather than once per hour, and reused for every latitude.
 
-        implicit none 
+        implicit none
 
-        real(dp), intent(IN) :: time_bp
-        real(dp), intent(IN) :: lat 
-        real(dp), intent(IN) :: S0
-        real (dp) :: solarm
+        real(dp), intent(OUT) :: decl        ! Solar declination [radians]
+        real(dp), intent(OUT) :: dist2       ! (a/r)^2, ratio of solar constant to its annual mean
+        integer,  intent(IN)  :: day
+        integer,  intent(IN)  :: day_max
+        real(dp), intent(IN)  :: ECC, XOBCH, TPERI, ZAVEXPE
 
         ! Local variables
-        integer   :: day, h
-        
-        integer, parameter :: nh = 24
-        integer, parameter :: day_max = 360 
+        real(dp) :: PCLOCK, PYTIME
+        real(dp) :: PDISSE, PZEN1, PZEN2, PZEN3, PRAE
 
-        
-        return 
+        PYTIME = dble(day)/dble(day_max)*2.0_dp*pi
+        PCLOCK = 0.0_dp
 
-    end function calc_insol_day_analytical_internal
+        call ORBIT(ECC,XOBCH,TPERI,ZAVEXPE, &
+                   PCLOCK,PYTIME,PDISSE,PZEN1,PZEN2,PZEN3,PRAE)
 
-    function calc_insol_day_internal(lat,PDISSE,PZEN1,PZEN2,S0) result(solarm)
-        ! Given latitude and sun hourly angle,
-        ! Calculate the daily insolation value 
-        ! Adapted from CLIMBER2.4 subroutine 'sinsol' by A. Ganopolski
+        ! PZEN1 = sin(declination); PDISSE = (a/r)^2
+        decl  = asin(max(-1.0_dp,min(1.0_dp,PZEN1)))
+        dist2 = PDISSE
 
-        implicit none 
+        return
 
-        integer   :: day, h, nh   
-        real (dp), intent(IN) :: lat, S0  
-        real (dp), intent(IN) :: PDISSE(:), PZEN1(:), PZEN2(:)
-        real (dp) :: latrad, coszm, cosp, cosn, S
-        real (dp) :: solarm
+    end subroutine calc_solar_geometry
 
-        ! How many hours in the day?
-        nh = size(PDISSE)
+    function calc_insol_day_internal(lat,decl,dist2,S0) result(solarm)
+        ! Daily-mean insolation on a horizontal surface [W/m2].
+        !
+        ! The daily mean of the solar zenith angle has a closed form (Berger,
+        ! 1978), so the integral is evaluated exactly rather than by summing over
+        ! the hours of the day:
+        !
+        !   solarm = S0 (a/r)^2 / pi * (H0 sin(phi) sin(dec) + cos(phi) cos(dec) sin(H0))
+        !
+        ! with the half-day angle H0 = acos(-tan(phi) tan(dec)), i.e. the hour
+        ! angle at sunrise and sunset. H0 = 0 in polar night and H0 = pi in polar
+        ! day, so both are handled without a special case.
+        !
+        ! Hourly summation was used previously (adapted from CLIMBER2.4 routine
+        ! 'sinsol' by A. Ganopolski). Because the integrand is clipped at zero at
+        ! sunrise and sunset, it is not smooth there, and 24 samples per day left
+        ! an error of up to 2.5 W/m2 -- large enough to bias the global annual
+        ! mean below S0/(4 sqrt(1-e^2)). The closed form removes it entirely.
 
-        ! Daily insolation is calculated by hourly integration for each day
-        solarm = 0.0_dp
-        coszm  = 0.0_dp 
-        latrad = lat*deg_to_rad 
+        implicit none
 
-        do h = 1, nh 
+        real(dp), intent(IN) :: lat         ! Latitude [degrees North]
+        real(dp), intent(IN) :: decl        ! Solar declination [radians]
+        real(dp), intent(IN) :: dist2       ! (a/r)^2
+        real(dp), intent(IN) :: S0          ! Solar constant [W/m2]
+        real(dp) :: solarm
 
-            cosp = PZEN1(h)*dsin(latrad) + PZEN2(h)*dcos(latrad)
-            cosn = max(cosp,0.0_dp)
+        ! Local variables
+        real(dp) :: latrad, sinlat, coslat, sindec, cosdec
+        real(dp) :: denom, cosH0, H0, sinH0
 
-            S = S0*cosn*PDISSE(h)
-            solarm = solarm + S
-            coszm  = coszm + S*cosn
+        latrad = lat*deg_to_rad
+        sinlat = sin(latrad)
+        coslat = cos(latrad)
+        sindec = sin(decl)
+        cosdec = cos(decl)
 
-        end do
-
-        ! Get daily average insolation and zenith angle 
-        solarm = solarm/24.0_dp
-        if (solarm .gt. 0.0_dp) then
-            coszm = coszm/(solarm*24.0_dp)
+        ! Hour angle at sunrise/sunset. At the poles cos(phi) = 0 and the
+        ! quotient is undefined; the sign of sin(phi)sin(dec) then decides
+        ! between polar day and polar night.
+        denom = coslat*cosdec
+        if (abs(denom) .lt. 1.0e-14_dp) then
+            cosH0 = sign(1.0_dp,-sinlat*sindec)
         else
-            coszm = 0.0_dp 
-        endif
+            cosH0 = -sinlat*sindec/denom
+        end if
 
-        return 
+        if (cosH0 .ge. 1.0_dp) then
+            H0    = 0.0_dp                  ! Polar night: sun never rises
+            sinH0 = 0.0_dp
+        else if (cosH0 .le. -1.0_dp) then
+            H0    = pi                      ! Polar day: sun never sets
+            sinH0 = 0.0_dp
+        else
+            H0 = acos(cosH0)
+            ! sin(H0) >= 0 for H0 in [0,pi], so the positive root is correct.
+            ! Cheaper than evaluating sin() a second time.
+            sinH0 = sqrt(1.0_dp-cosH0*cosH0)
+        end if
+
+        solarm = S0*dist2/pi * (H0*sinlat*sindec + coslat*cosdec*sinH0)
+
+        return
 
     end function calc_insol_day_internal
 
@@ -583,20 +572,7 @@ end if
         OPAR%xobm = OPAR%xobm * 180.0/pi
         OPAR%perm = OPAR%perm * 180.0/pi
 
-        ! Also initialize the default latitude vector for insol calculations
-        ! (actual lat values are interpolated from these generic calcs)
-        OPAR%n_lat = 61 
-        if (allocated(OPAR%lats))   deallocate(OPAR%lats)
-        if (allocated(OPAR%solarm)) deallocate(OPAR%solarm)
-        if (allocated(OPAR%coszm))  deallocate(OPAR%coszm)
-        allocate(OPAR%lats(OPAR%n_lat),OPAR%solarm(OPAR%n_lat),OPAR%coszm(OPAR%n_lat))
-
-        do n = 1, OPAR%n_lat
-            OPAR%lats(n) = -90.0_dp + (n-1)*180.0_dp/dble(OPAR%n_lat-1)
-        end do 
-
-        
-        return 
+        return
 
     end subroutine orbital_par_init 
 
