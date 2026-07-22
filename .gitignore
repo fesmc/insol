@@ -1,4 +1,7 @@
 .DS_Store
-.obj
 Makefile
 *.x
+libinsol/include/*
+libinsol/bin/*
+!libinsol/include/.gitkeep
+!libinsol/bin/.gitkeep

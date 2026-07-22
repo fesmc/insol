@@ -2,19 +2,27 @@
 .SHELL: /bin/sh
 
 # PATH options
-srcdir = ./
-objdir = .obj
-bindir = ./
-testdir = ./
+srcdir  = src
+objdir  = libinsol/include
+bindir  = libinsol/bin
+testdir = tests
 
 # Command-line options at make call
-debug    ?= 0
-parallel ?= 0 
+debug  ?= 0
+openmp ?= 0
 
 ## COMPILER CONFIGURATION ##
-# (should be loaded from config directory)
+# Assembled by `configme`: the compiler fragment (FC, FFLAGS, FFLAGS_OPENMP,
+# DFLAGS_*), the machine fragment (host-specific overrides), and the detected
+# netCDF wiring (INC_NC, LIB_NC).
 
 <COMPILER_CONFIGURATION>
+
+## DEPENDENCY WIRING ##
+# Pulled in after the compiler/machine fragment so it can reference FFLAGS,
+# FFLAGS_OPENMP, LIB_NC and LFLAGS_EXTRA set there.
+
+include config/common.mk
 
 # Determine whether to use normal flags or debugging flags
 DFLAGS = $(DFLAGS_NODEBUG)
@@ -28,25 +36,28 @@ ifeq ($(debug), 2)
 endif
 
 ###############################################
-##							
-## List of rules and source files
+##
+## List of insol source files
 ##
 ###############################################
 
-## Individual libraries or modules ##
-$(objdir)/ncio.o: ncio.f90
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_NC) -c -o $@ $<
+# Core library: orbital solution and insolation. No external dependencies.
+insol_core = $(objdir)/interp1D.o \
+             $(objdir)/insolation.o
 
-$(objdir)/interp1D.o: interp1D.f90
+# Irradiance: surface irradiance decomposition (DNI/DHI) for the renewable
+# energy applications. Independent of the core; see README.
+insol_irradiance = $(objdir)/irradiance.o
+
+insol_libs = $(insol_core) $(insol_irradiance)
+
+$(objdir)/interp1D.o: $(srcdir)/interp1D.f90
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
-$(objdir)/insolation.o: insolation.f90
+$(objdir)/insolation.o: $(srcdir)/insolation.f90 $(objdir)/interp1D.o
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
-$(objdir)/irradiance.o: irradiance.f90
-	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
-
-$(objdir)/sinsol_orbit.o: sinsol_orbit.f
+$(objdir)/irradiance.o: $(srcdir)/irradiance.f90
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
 ###############################################
@@ -55,38 +66,38 @@ $(objdir)/sinsol_orbit.o: sinsol_orbit.f
 ##
 ###############################################
 
-# Static library compilation
-yelmo-static: $(yelmo_libs) $(yelmo_physics) $(yelmo_base) $(yelmo_tests)
-	ar rc $(objdir)/libyelmo.a $(yelmo_libs) $(yelmo_physics) $(yelmo_base) $(yelmo_tests)
-	ranlib $(objdir)/libyelmo.a
+.PHONY: all static test test-dni check clean
+
+all: static
+
+# Static library
+static: $(insol_libs)
+	ar rc $(objdir)/libinsol.a $(insol_libs)
+	ranlib $(objdir)/libinsol.a
 	@echo " "
-	@echo "    $(objdir)/libyelmo.a is ready."
+	@echo "    $(objdir)/libinsol.a is ready."
 	@echo " "
 
-test_dni: $(objdir)/ncio.o $(objdir)/interp1D.o $(objdir)/insolation.o $(objdir)/irradiance.o
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_NC) -o $(bindir)/test_dni.x $^ $(srcdir)/test_dni.f90 $(LFLAGS)
+# Regression tests for the core library. Deliberately free of netCDF and
+# fesm-utils so the physics can be checked with only a Fortran compiler.
+test: $(insol_core)
+	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_insol.x $^ $(testdir)/test_insol.f90
 	@echo " "
-	@echo "    test_dni.x is ready."
-	@echo " "
-
-test: $(objdir)/ncio.o $(objdir)/interp1D.o $(objdir)/insolation.o $(objdir)/irradiance.o
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_NC) -o $(bindir)/test_insol.x $^ $(srcdir)/test_insol.f90 $(LFLAGS)
-	@echo " "
-	@echo "    test_insol.x is ready."
+	@echo "    $(bindir)/test_insol.x is ready."
 	@echo " "
 
-test_insol0: $(objdir)/ncio.o $(objdir)/sinsol_orbit.o
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_NC) -o $(bindir)/test_insol0.x $^ $(srcdir)/test_insol.f90 $(LFLAGS)
-	@echo " "
-	@echo "    test_insol0.x is ready."
-	@echo " "
+# Run the regression tests. Must be run from the repository root so that the
+# input tables and reference values resolve.
+check: test
+	@$(bindir)/test_insol.x
 
-insol65N: $(objdir)/ncio.o $(objdir)/interp1D.o $(objdir)/insolation.o
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_NC) -o $(bindir)/test_insol_65N.x $^ $(srcdir)/test_insol_65N.f90 $(LFLAGS)
+# Irradiance / DNI tests. These read netCDF input, so they need fesm-utils.
+test-dni: $(insol_libs)
+	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) $(INC_NC) -o $(bindir)/test_dni.x \
+		$^ $(testdir)/test_dni.f90 $(LFLAGS)
 	@echo " "
-	@echo "    test_insol_65N.x is ready."
+	@echo "    $(bindir)/test_dni.x is ready."
 	@echo " "
 
 clean:
-	rm -f $(srcdir)/*.x $(objdir)/*.o $(objdir)/*.mod
-
+	rm -f $(bindir)/*.x $(objdir)/*.o $(objdir)/*.mod $(objdir)/*.a
