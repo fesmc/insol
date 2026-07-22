@@ -56,7 +56,11 @@ module insol_orbit
     public :: calc_orbital_par
     public :: calc_solar_geometry
     public :: calc_solar_geometry_at
+    public :: calc_solar_geometry_M
+    public :: calc_solar_geometry_date
+    public :: calc_julian_day
     public :: calc_solar_position
+    public :: calc_solar_position_date
 
 contains
 
@@ -154,18 +158,42 @@ contains
         real(dp), intent(IN)  :: ZAVEXPE     ! Longitude of perihelion from vernal equinox [radians]
 
         ! Local variables
-        integer, parameter :: niter_max = 30
-        real(dp), parameter :: tol = 1.0e-12_dp
-
-        integer  :: niter
-        real(dp) :: ytime, mean_anom, ecc_anom, ecc_anom_new, de
-        real(dp) :: true_anom, lambda, obliq, mean_lon, right_asc
+        real(dp) :: ytime, mean_anom
 
         ytime = day_time/real(day_max,dp)*2.0_dp*pi
 
         ! Mean anomaly: angle of a fictitious sun moving at constant rate,
         ! measured from perihelion.
         mean_anom = ytime - 2.0_dp*pi*TPERI/real(day_max,dp)
+
+        call calc_solar_geometry_M(decl,dist2,eqtime,mean_anom,ECC,XOBCH,ZAVEXPE)
+
+        return
+
+    end subroutine calc_solar_geometry_at
+
+    subroutine calc_solar_geometry_M(decl,dist2,eqtime,mean_anom,ECC,XOBCH,ZAVEXPE)
+        ! Solar declination, distance factor and equation of time from the mean
+        ! anomaly. This is the whole of the solar geometry; the callers above
+        ! differ only in how they turn a time into a mean anomaly.
+
+        implicit none
+
+        real(dp), intent(OUT) :: decl        ! Solar declination [radians]
+        real(dp), intent(OUT) :: dist2       ! (a/r)^2
+        real(dp), intent(OUT) :: eqtime      ! Equation of time [radians of hour angle]
+        real(dp), intent(IN)  :: mean_anom   ! Mean anomaly [radians from perihelion]
+        real(dp), intent(IN)  :: ECC         ! Eccentricity
+        real(dp), intent(IN)  :: XOBCH       ! Obliquity [degrees]
+        real(dp), intent(IN)  :: ZAVEXPE     ! Longitude of perihelion from vernal equinox [radians]
+
+        ! Local variables
+        integer, parameter :: niter_max = 30
+        real(dp), parameter :: tol = 1.0e-12_dp
+
+        integer  :: niter
+        real(dp) :: ecc_anom, ecc_anom_new, de
+        real(dp) :: true_anom, lambda, obliq, mean_lon, right_asc
 
         ! Solve Kepler's equation E - e sin(E) = M by Newton iteration.
         ecc_anom = mean_anom
@@ -178,7 +206,7 @@ contains
         end do
 
         if (niter .gt. niter_max) then
-            write(*,*) "calc_solar_geometry_at:: Error: eccentric anomaly did not converge."
+            write(*,*) "calc_solar_geometry_M:: Error: eccentric anomaly did not converge."
             write(*,*) "eccentricity: ", ECC
             write(*,*) "mean anomaly: ", mean_anom
             error stop 1
@@ -208,7 +236,76 @@ contains
 
         return
 
-    end subroutine calc_solar_geometry_at
+    end subroutine calc_solar_geometry_M
+
+    subroutine calc_solar_geometry_date(decl,dist2,eqtime,jd,ECC,XOBCH,ZAVEXPE)
+        ! As calc_solar_geometry_at, but phased on a real date rather than on the
+        ! idealized calendar.
+        !
+        ! The idealized calendar pins the vernal equinox to a fixed day of a year
+        ! of exactly day_year days. That is the right convention for paleoclimate,
+        ! where no Gregorian calendar exists, but it does not track the real leap
+        ! cycle, and for actual timestamps it misplaces the Earth in its orbit by
+        ! up to a day or so.
+        !
+        ! Here the mean anomaly instead comes from elapsed time since J2000 at the
+        ! observed mean rate (Meeus 1998, ch. 25), which is tied to real dates by
+        ! construction. The orbital elements are still those of Laskar et al.
+        ! (2004): the orbit is the same, only the clock differs.
+
+        implicit none
+
+        real(dp), intent(OUT) :: decl        ! Solar declination [radians]
+        real(dp), intent(OUT) :: dist2       ! (a/r)^2
+        real(dp), intent(OUT) :: eqtime      ! Equation of time [radians of hour angle]
+        real(dp), intent(IN)  :: jd          ! Julian Day (UT)
+        real(dp), intent(IN)  :: ECC, XOBCH, ZAVEXPE
+
+        ! Local variables
+        real(dp) :: t_cent, mean_anom
+
+        ! Julian centuries since J2000.0
+        t_cent = (jd - 2451545.0_dp)/36525.0_dp
+
+        ! Mean anomaly of the Sun at the observed mean rate. The linear term
+        ! corresponds to an anomalistic year of 365.2596 days.
+        mean_anom = (357.52911_dp + 35999.05029_dp*t_cent &
+                     - 0.0001537_dp*t_cent*t_cent)*deg_to_rad
+
+        call calc_solar_geometry_M(decl,dist2,eqtime,mean_anom,ECC,XOBCH,ZAVEXPE)
+
+        return
+
+    end subroutine calc_solar_geometry_date
+
+    function calc_julian_day(year,month,day) result(jd)
+        ! Julian Day at 00:00 UT of a Gregorian calendar date (Meeus 1998, ch. 7).
+
+        implicit none
+
+        integer, intent(IN) :: year, month, day
+        real(dp) :: jd
+
+        ! Local variables
+        integer :: y, m, a, b
+
+        y = year
+        m = month
+        if (m .le. 2) then
+            y = y - 1
+            m = m + 12
+        end if
+
+        a = y/100
+        b = 2 - a + a/4
+
+        jd = real(floor(365.25_dp*real(y+4716,dp)),dp) &
+           + real(floor(30.6001_dp*real(m+1,dp)),dp) &
+           + real(day,dp) + real(b,dp) - 1524.5_dp
+
+        return
+
+    end function calc_julian_day
 
     subroutine calc_solar_position(orb,cosz,time_bp,day_time,lat,lon,decl,eqtime)
         ! Cosine of the solar zenith angle at an instant and a location.
@@ -256,6 +353,60 @@ contains
         return
 
     end subroutine calc_solar_position
+
+    subroutine calc_solar_position_date(orb,cosz,year,month,day,hour_utc,lat,lon, &
+                                        decl,eqtime)
+        ! Cosine of the solar zenith angle at a real calendar date and time.
+        !
+        ! For present-day work -- a climate model running on real time, or the
+        ! irradiance decomposition of observational data -- where timestamps are
+        ! Gregorian dates rather than positions in an idealized year. Orbital
+        ! elements are taken from the tables at this year, so the same call is
+        ! valid for any year they cover.
+        !
+        ! `hour_utc` is the hour of the day in UTC; `lon` is degrees east.
+
+        implicit none
+
+        type(orbit_class), intent(IN)  :: orb
+        real(dp),          intent(OUT) :: cosz
+        integer,           intent(IN)  :: year, month, day
+        real(dp),          intent(IN)  :: hour_utc
+        real(dp),          intent(IN)  :: lat        ! [degrees north]
+        real(dp),          intent(IN)  :: lon        ! [degrees east]
+        real(dp),          intent(OUT), optional :: decl
+        real(dp),          intent(OUT), optional :: eqtime
+
+        ! Local variables
+        real(dp) :: jd, time_bp
+        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
+        real(dp) :: decl_now, dist2, eqtime_now
+        real(dp) :: hour_angle, latrad
+
+        jd = calc_julian_day(year,month,day) + hour_utc/24.0_dp
+
+        ! Orbital elements drift on timescales of millennia, so the year alone
+        ! resolves them far more finely than the tables themselves.
+        time_bp = real(year,dp) - 1950.0_dp
+
+        call calc_orbital_par(orb,time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE)
+        call calc_solar_geometry_date(decl_now,dist2,eqtime_now,jd,ECC,XOBCH,ZAVEXPE)
+
+        ! Hour angle: zero at local apparent noon. The Julian Day begins at noon,
+        ! so shifting by half a day gives the fraction elapsed since midnight UT.
+        hour_angle = (jd + 0.5_dp - real(floor(jd + 0.5_dp),dp))*2.0_dp*pi &
+                     + lon*deg_to_rad + eqtime_now - pi
+
+        latrad = lat*deg_to_rad
+
+        cosz = sin(latrad)*sin(decl_now) + cos(latrad)*cos(decl_now)*cos(hour_angle)
+
+        if (present(decl))   decl   = decl_now
+        if (present(eqtime)) eqtime = eqtime_now
+
+        return
+
+    end subroutine calc_solar_position_date
 
     subroutine calc_orbital_par(orb,time,per,ecc,obl,tper,zan)
         !

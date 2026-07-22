@@ -86,14 +86,16 @@ static: $(insol_libs)
 # fesm-utils so the physics can be checked with only a Fortran compiler.
 test: $(insol_core)
 	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_insol.x $^ $(testdir)/test_insol.f90
+	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_orbit.x $^ $(testdir)/test_orbit.f90
 	@echo " "
-	@echo "    $(bindir)/test_insol.x is ready."
+	@echo "    $(bindir)/test_insol.x, $(bindir)/test_orbit.x are ready."
 	@echo " "
 
 # Run the regression tests. Must be run from the repository root so that the
 # input tables and reference values resolve.
 check: test
 	@$(bindir)/test_insol.x
+	@$(bindir)/test_orbit.x
 
 # Irradiance / DNI tests. These read netCDF input, so they need fesm-utils.
 test-dni: $(insol_libs)
