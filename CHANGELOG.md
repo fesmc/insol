@@ -10,6 +10,10 @@ see [Migrating](#migrating) below.
 
 ### Fixed
 
+- **Irradiance DNI carried a 30-minute timing bug.** The old `calc_hour_angle`
+  applied a hardcoded −0.5 h offset, which skewed the zenith most at sunrise and
+  sunset where `dni = fdir/cos(z)` is most sensitive. Repointing the geometry at
+  `insol_orbit` removed it: DNI RMSE against NREL fell from 171 to 52 W/m².
 - **Daily-mean insolation was systematically wrong by up to 2.5 W/m².** The
   daily integral was evaluated by summing 24 hourly samples, which converges
   poorly because `max(cos z, 0)` has a kink at sunrise and sunset. It is now
@@ -36,11 +40,24 @@ see [Migrating](#migrating) below.
 
 - `insol_class`, holding the orbital tables and optionally a latitude grid.
 - `insol_init` / `insol_end`.
+- `insol_orbit`, the orbital solution as a module shared by the insolation core
+  and the irradiance side, so both see the same Sun.
+- Real-date solar geometry (`calc_solar_position_date`): the same orbit phased
+  on a Gregorian date rather than the idealized paleo calendar, for present-day
+  climate models and the irradiance decomposition. The equation of time falls
+  out of the Kepler solve (validated −14 to +16 min against NREL).
+- An elevation threshold on `calc_insol_day` (`elev_min`, `tday`, `coszm`
+  optional arguments) for diurnal melt schemes such as dEBM: the daily mean
+  restricted to when the sun is above a per-gridpoint elevation. `elev_min = 0`
+  reproduces the plain daily mean exactly.
 - Regression test suite (`make check`): 1440 reference points across both
   calendars, cross-validated against `scripts/make_reference.jl`, an
   independent Julia implementation sharing no code with the library; plus
   interface consistency, non-negativity and bounds, polar night, the equinox
   convention, and global energy balance.
+- Tests for the irradiance side, which previously had none: DISC-estimated DNI
+  scored against measured NREL NSRDB station data (~52 W/m² RMSE against a
+  measured DNI RMS of ~558), plus a solar-position and Julian-Day suite.
 - CI over three builds: default, `debug=1` with `-fcheck=all`, and
   `-DINSOL_SP`.
 - `wp` compile-time precision switch for the interface (`-DINSOL_SP` selects
@@ -56,14 +73,23 @@ see [Migrating](#migrating) below.
 - Passing a fixed latitude grid to `insol_init` precomputes its geometry once.
   Against the previous implementation, per-day calls are ~21× faster at a
   single latitude, ~7× at 181, and ~2.8× at 2257 — while being exact.
+- `irradiance` takes its geometry from `insol_orbit` and its `wp`/constants
+  from `insol_defs` rather than carrying its own. Its DNI routines now take an
+  `orbit_class` and a real date (year + UTC hour of year); the `time_zone` and
+  `tisr` arguments are gone. The solar constant unifies on 1365 (from 1370).
+- The library now has no external dependencies — no netCDF, no fesm-utils — and
+  builds with only a Fortran compiler.
 
 ### Removed
 
 - The latitude spline and `interp1D.f90`, with no replacement: the analytic
   kernel is faster than the interpolation it existed to avoid.
+- `irradiance`'s own solar geometry: the Spencer (1971) declination and
+  equation-of-time series, `calc_hour_angle`, and the duplicated
+  top-of-atmosphere series, all superseded by `insol_orbit`.
 - `sinsol_orbit.f`, a Fortran 77 duplicate of the same orbital solution.
-- The vendored `ncio.f90` (3779 lines); the irradiance tests take it from
-  fesm-utils.
+- The vendored `ncio.f90` (3779 lines) and the `test_dni` ERA5 processing
+  driver that used it, along with the fesm-utils dependency they required.
 - `test_data/` (6.9 MB), read only by the removed netCDF test program.
 - `input/orbit_par_5000.txt`, unreferenced.
 

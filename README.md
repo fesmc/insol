@@ -25,8 +25,8 @@ make static                       # -> libinsol/include/libinsol.a
 make check                        # build and run the regression tests
 ```
 
-`make check` needs nothing but a Fortran compiler. Only the irradiance tests
-(`make test-dni`) require netCDF and fesm-utils.
+The library has no external dependencies -- no netCDF, no fesm-utils -- so it
+builds and tests with only a Fortran compiler.
 
 ## Use
 
@@ -79,6 +79,26 @@ call calc_insol_ave(is,insol_mean,[152,243],time_bp)  ! mean over a day range
 `calc_insol_ave` takes an optional `step` to sample the range rather than
 evaluate every day.
 
+### Diurnal melt schemes
+
+`calc_insol_day` takes an optional minimum solar elevation `elev_min`, so the
+daily mean counts only the part of the day when the sun is higher than that
+angle — what schemes like dEBM (Krebs-Kanzow et al., 2018) need. It can also
+return the fraction of the day the sun is above that elevation and the
+flux-weighted mean cosine of the zenith angle over it:
+
+```fortran
+real(wp) :: insol, tday, coszm
+
+call calc_insol_day(is,insol,day,lat,time_bp,elev_min=17.5_dp,tday=tday,coszm=coszm)
+!   insol       daily-mean flux, counting only when the sun is above 17.5°
+!   tday        fraction of the day the sun is above 17.5°
+!   insol/tday  mean flux while it is
+```
+
+`elev_min = 0` (or omitting it) recovers the plain daily mean exactly. On a grid
+`elev_min` is one value per grid point, since dEBM estimates it locally.
+
 ### Conventions
 
 - `time_bp` is years relative to 1950; negative is into the past.
@@ -111,14 +131,37 @@ To regenerate the reference values:
 julia scripts/make_reference.jl
 ```
 
+### Solar position at a real date
+
+For present-day work — a climate model on real time, or the irradiance
+decomposition below — the geometry can be phased on a Gregorian date rather than
+the idealized paleo calendar. This is the same orbital solution; only the clock
+differs (see `src/insol_orbit.f90`, `calc_solar_position_date`).
+
 ## Irradiance
 
-`irradiance.f90` estimates direct normal irradiance from ERA5-style fields
-(DISC, Boland 2013, BRL, and the Blanc & Wald 2016 effective zenith angle). It
-is independent of the insolation core, carries its own precision kinds and
-constants, and uses a different solar constant (1370 W/m²). It has no regression
-tests and was not revisited in this refactor; treat its results with more
-caution than the core.
+`irradiance.f90` estimates direct normal irradiance (DNI) from global horizontal
+irradiance via the DISC model (Maxwell 1987), plus a Blanc & Wald (2016)
+effective-zenith path for beam flux. It shares the orbital solution
+(`insol_orbit`) with the core rather than carrying its own, so it uses real
+dates and the same 1365 W/m² solar constant.
+
+```fortran
+use irradiance
+use insol_orbit, only : orbit_class, orbit_init
+
+type(orbit_class) :: orb
+real(wp) :: dni
+
+call orbit_init(orb, day_year=365)
+call calc_dni_disc(orb, dni, year, hour, lat, lon, ghi, pres, .false.)
+!   hour = hours since 00:00 UTC on 1 January of `year`; lon = degrees east
+```
+
+DISC is empirical, so it is tested against measured DNI in the NSRDB station
+fixture (`tests/reference/nrel_stations.txt`) with a bound on the RMSE, ~52 W/m²
+against a measured DNI RMS of ~558. The Boland (2013) and BRL paths remain
+unfinished and untested — treat them with caution.
 
 ## License
 

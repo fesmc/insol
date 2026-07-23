@@ -13,14 +13,14 @@ openmp ?= 0
 
 ## COMPILER CONFIGURATION ##
 # Assembled by `configme`: the compiler fragment (FC, FFLAGS, FFLAGS_OPENMP,
-# DFLAGS_*), the machine fragment (host-specific overrides), and the detected
-# netCDF wiring (INC_NC, LIB_NC).
+# DFLAGS_*) and the machine fragment (host-specific overrides). insol has no
+# external library dependencies, so no netCDF wiring is needed.
 
 <COMPILER_CONFIGURATION>
 
 ## DEPENDENCY WIRING ##
-# Pulled in after the compiler/machine fragment so it can reference FFLAGS,
-# FFLAGS_OPENMP, LIB_NC and LFLAGS_EXTRA set there.
+# Pulled in after the compiler/machine fragment so it can reference FFLAGS and
+# FFLAGS_OPENMP set there.
 
 include config/common.mk
 
@@ -70,7 +70,7 @@ $(objdir)/irradiance.o: $(srcdir)/irradiance.f90 $(objdir)/insol_orbit.o
 ##
 ###############################################
 
-.PHONY: all static test test-dni check clean
+.PHONY: all static test check clean
 
 all: static
 
@@ -82,8 +82,7 @@ static: $(insol_libs)
 	@echo "    $(objdir)/libinsol.a is ready."
 	@echo " "
 
-# Regression tests for the core library. Deliberately free of netCDF and
-# fesm-utils so the physics can be checked with only a Fortran compiler.
+# Regression tests. The whole library builds with only a Fortran compiler.
 test: $(insol_core) $(insol_irradiance)
 	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_insol.x $(insol_core) $(testdir)/test_insol.f90
 	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_orbit.x $(insol_core) $(testdir)/test_orbit.f90
@@ -98,14 +97,6 @@ check: test
 	@$(bindir)/test_insol.x
 	@$(bindir)/test_orbit.x
 	@$(bindir)/test_irradiance.x
-
-# Irradiance / DNI tests. These read netCDF input, so they need fesm-utils.
-test-dni: $(insol_libs)
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) $(INC_NC) -o $(bindir)/test_dni.x \
-		$^ $(testdir)/test_dni.f90 $(LFLAGS)
-	@echo " "
-	@echo "    $(bindir)/test_dni.x is ready."
-	@echo " "
 
 clean:
 	rm -f $(bindir)/*.x $(objdir)/*.o $(objdir)/*.mod $(objdir)/*.a

@@ -17,10 +17,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gfortran
 
-      # The core library and its tests need nothing but a Fortran compiler, so
-      # the Makefile is assembled here directly from the template rather than by
-      # installing configme. `make test-dni` is not exercised: that half needs
-      # netCDF and fesm-utils.
+      # The whole library builds with nothing but a Fortran compiler -- no
+      # netCDF, no fesm-utils -- so the Makefile is assembled here directly from
+      # the template rather than by installing configme.
       - name: Configure
         run: |
           python3 - <<'EOF'
