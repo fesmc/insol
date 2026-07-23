@@ -1,9 +1,30 @@
 # Changelog
 
-Notable changes to `insol`. The library is not versioned yet, so changes are
-grouped by the refactor that introduced them.
+Notable changes to `insol`, newest first. Versions are annotated git tags.
 
-## Unreleased
+## v1.1.0
+
+Additive release: sub-daily and daylength routines, and a selectable mean-cosine
+convention. Backwards compatible — existing calls are unchanged, and the default
+`coszm_kind` reproduces previous results.
+
+### Added
+
+- `calc_insol_diurnal` / `calc_insol_diurnal_days`: the sub-daily insolation and
+  cosine of the zenith angle sampled across the day, with the daily mean, min,
+  max and mean cosine returned alongside. The mean and mean cosine come from the
+  closed form; only the extremes depend on the sampling. Resolves on the rank of
+  `solar` — point, 1D or 2D grid (plus 1D/2D for the multi-day form) — mirroring
+  `calc_insol_day` / `calc_insol_days`. Arrays are laid out with the grid
+  dimensions first and `n_hour` last.
+- `calc_daylength` (point, 1D and 2D): hours the sun is above the horizon.
+- A `coszm_kind` option on `insol_init` selecting how the mean cosine of the
+  zenith angle is defined — `"flux"` (flux-weighted, the default and the dEBM
+  convention) or `"daytime"` (the plain daytime mean, the CLIMBER-X convention).
+  Resolved to an integer code once at init, so the hot path carries no string
+  comparison.
+
+## v1.0.0
 
 Substantial refactor. The API is not backwards compatible and results change —
 see [Migrating](#migrating) below.

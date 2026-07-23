@@ -44,8 +44,9 @@ call calc_insol_day(is,insol,170,65.0_dp,0.0_dp) ! day 170, 65N, 1950 CE
 ```
 
 `insol_init` takes optional `fldr` (location of the orbital tables, default
-`input`), `S0` (solar constant, default 1365 W/m²) and `day_year` (360, 365 or
-366; default 360).
+`input`), `S0` (solar constant, default 1365 W/m²), `day_year` (360, 365 or
+366; default 360) and `coszm_kind` (`"flux"` or `"daytime"`, default `"flux"`;
+see [Mean cosine convention](#mean-cosine-convention)).
 
 ### Grids
 
@@ -98,6 +99,50 @@ call calc_insol_day(is,insol,day,lat,time_bp,elev_min=17.5_dp,tday=tday,coszm=co
 
 `elev_min = 0` (or omitting it) recovers the plain daily mean exactly. On a grid
 `elev_min` is one value per grid point, since dEBM estimates it locally.
+
+### Diurnal cycle
+
+Where the sub-daily cycle itself is needed — an hourly top-of-atmosphere flux, a
+daily min/max, a daytime-mean zenith angle — `calc_insol_diurnal` samples the
+day. The number of samples is the trailing dimension of `solar`:
+
+```fortran
+real(wp) :: solar(ny,24), cosz(ny,24)          ! hourly cycle
+real(wp) :: solarm(ny), solarmin(ny), solarmax(ny), coszm(ny)
+
+call calc_insol_diurnal(is,day,time_bp,solar,cosz, &
+                        solarm=solarm,solarmin=solarmin,solarmax=solarmax,coszm=coszm)
+```
+
+`solar` and `cosz` hold the insolation and cosine of the zenith angle at `n_hour`
+equal steps across the day (midnight to midnight, sampled at step centres). The
+optional `solarm`/`coszm` are the daily mean and mean cosine — taken from the
+exact closed form, so they do not depend on `n_hour` — while `solarmin`/
+`solarmax` are the extremes over the samples.
+
+Like `calc_insol_day`, it resolves on the rank of `solar`: a point (with an
+explicit latitude, needing no grid), the 1D grid, or the 2D grid, with `solar`
+shaped `(n_hour)`, `(n_lat,n_hour)` or `(n1,n2,n_hour)` — the grid dimensions
+first, `n_hour` last — and the aggregates without the `n_hour` axis.
+`calc_insol_diurnal_days` fills a whole set of days in one call, on the 1D or 2D
+grid, inserting a day axis just before `n_hour` (`(n_lat,n_day,n_hour)`,
+`(n1,n2,n_day,n_hour)`).
+
+`calc_daylength` returns the hours the sun is above the horizon, for a point, a
+1D grid or a 2D grid; it equals `24*tday` at `elev_min = 0`.
+
+### Mean cosine convention
+
+`coszm` — from `calc_insol_day`, `calc_insol_diurnal` or the elevation-threshold
+path — is a mean cosine of the solar zenith angle, and there are two conventions
+for it. The default, `"flux"`, weights each instant by the insolation it carries
+(what dEBM uses). `"daytime"` is the plain mean over the daylit part of the day
+(what CLIMBER-X's albedo schemes expect). The choice is fixed once, at
+`insol_init`, and applies to every `coszm` the state returns:
+
+```fortran
+call insol_init(is,lats,coszm_kind="daytime")
+```
 
 ### Conventions
 

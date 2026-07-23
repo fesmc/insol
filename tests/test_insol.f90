@@ -54,6 +54,10 @@ program test_insol
     call test_equinox_convention()
     call test_interface_consistency()
     call test_elevation_threshold()
+    call test_diurnal()
+    call test_diurnal_interfaces()
+    call test_coszm_kind()
+    call test_daylength()
     call test_non_negative()
     call test_polar_night()
     call test_energy_balance()
@@ -360,6 +364,351 @@ contains
         call insol_end(isl)
 
     end subroutine test_elevation_threshold
+
+    subroutine test_diurnal()
+        ! The diurnal routine samples the day; the daily mean it returns comes
+        ! from the exact closed form. Three things must hold: the sampled cycle
+        ! integrates back to that mean as the sampling is refined, the samples
+        ! obey the same physical bounds as the daily mean (non-negative, below
+        ! the instantaneous solar constant, min <= mean <= max), and the
+        ! whole-year `_days` call agrees with the per-day call.
+
+        implicit none
+
+        integer, parameter :: nlat = 46
+        integer, parameter :: nh   = 2880          ! 30-second sampling
+        real(dp) :: lats(nlat)
+        real(wp) :: solar(nlat,nh), cosz(nlat,nh)
+        real(wp) :: solarm(nlat), solarmin(nlat), solarmax(nlat), coszm(nlat)
+        real(wp) :: mean_sampled
+        real(dp) :: err_mean, err_bounds, err_order, err_cosz
+        integer  :: i, day
+        type(insol_class) :: isg
+
+        ! Days-wrapper cross-check
+        integer, parameter :: nd = 4
+        integer  :: days(nd)
+        real(wp) :: solar3(nlat,nd,nh), cosz3(nlat,nd,nh)
+        real(wp) :: solarm2(nlat,nd), solarmin2(nlat,nd)
+        real(wp) :: solarmax2(nlat,nd), coszm2(nlat,nd)
+        real(dp) :: err_days
+
+        do i = 1, nlat
+            lats(i) = -90.0_dp + (i-1)*180.0_dp/real(nlat-1,dp)
+        end do
+
+        call insol_init(isg,lats,fldr=fldr,S0=S0_ref)
+
+        err_mean   = 0.0_dp
+        err_bounds = 0.0_dp
+        err_order  = 0.0_dp
+        err_cosz   = 0.0_dp
+
+        do day = 1, 360, 15
+            call calc_insol_diurnal(isg,day,0.0_dp,solar,cosz, &
+                                    solarm=solarm,solarmin=solarmin, &
+                                    solarmax=solarmax,coszm=coszm)
+            do i = 1, nlat
+                ! Sampled mean must converge to the analytic daily mean.
+                mean_sampled = sum(solar(i,:))/real(nh,wp)
+                err_mean = max(err_mean, abs(real(mean_sampled-solarm(i),dp)))
+
+                ! Physical bounds on the instantaneous samples.
+                err_bounds = max(err_bounds, real(-minval(solar(i,:)),dp))
+                err_bounds = max(err_bounds, real(maxval(solar(i,:))-1.05_wp*S0_ref,dp))
+                err_bounds = max(err_bounds, real(-minval(cosz(i,:)),dp))
+                err_bounds = max(err_bounds, real(maxval(cosz(i,:))-1.0_wp,dp))
+
+                ! Min <= mean <= max.
+                err_order = max(err_order, real(solarmin(i)-solarm(i),dp))
+                err_order = max(err_order, real(solarm(i)-solarmax(i),dp))
+
+                ! Reported min/max must match the samples they summarize.
+                err_cosz = max(err_cosz, real(abs(solarmin(i)-minval(solar(i,:))),dp))
+                err_cosz = max(err_cosz, real(abs(solarmax(i)-maxval(solar(i,:))),dp))
+            end do
+        end do
+
+        call check("diurnal mean integrates to daily mean", err_mean, 5.0e-2_dp, &
+                   "max |mean(samples) - solarm| [W/m2]")
+        call check("diurnal samples within physical bounds", err_bounds, tol_ref, &
+                   "worst bound violation")
+        call check("diurnal min <= mean <= max", err_order, tol_ref, &
+                   "worst ordering violation [W/m2]")
+        call check("diurnal min/max match samples", err_cosz, tol_ref, &
+                   "max |reported - sample extreme| [W/m2]")
+
+        ! --- the _days call must reproduce the per-day call exactly ---
+        days = [10, 100, 200, 300]
+        call calc_insol_diurnal_days(isg,days,0.0_dp,solar3,cosz3, &
+                                     solarm=solarm2,solarmin=solarmin2, &
+                                     solarmax=solarmax2,coszm=coszm2)
+
+        err_days = 0.0_dp
+        do i = 1, nd
+            call calc_insol_diurnal(isg,days(i),0.0_dp,solar,cosz, &
+                                    solarm=solarm,solarmin=solarmin, &
+                                    solarmax=solarmax,coszm=coszm)
+            err_days = max(err_days, real(maxval(abs(solar3(:,i,:)-solar)),dp))
+            err_days = max(err_days, real(maxval(abs(cosz3(:,i,:)-cosz)),dp))
+            err_days = max(err_days, real(maxval(abs(solarm2(:,i)-solarm)),dp))
+            err_days = max(err_days, real(maxval(abs(coszm2(:,i)-coszm)),dp))
+        end do
+
+        call insol_end(isg)
+
+        call check("diurnal _days matches per-day", err_days, 0.0_dp, &
+                   "max |days - per-day|")
+
+    end subroutine test_diurnal
+
+    subroutine test_diurnal_interfaces()
+        ! The point, 1D and 2D diurnal interfaces differ only in the shape of
+        ! their arguments; they must return identical numbers for the same
+        ! latitude. The point form additionally must need no grid, and the 2D
+        ! `_days` form must reproduce the 2D per-day form.
+
+        implicit none
+
+        integer, parameter :: nh = 48
+        integer, parameter :: nx = 8, ny = 5, nlat = nx*ny
+        real(dp) :: lats1D(nlat), lats2D(nx,ny)
+        real(wp) :: solar1(nlat,nh), cosz1(nlat,nh)
+        real(wp) :: solarm1(nlat), solarmin1(nlat), solarmax1(nlat), coszm1(nlat)
+        real(wp) :: solar2(nx,ny,nh), cosz2(nx,ny,nh)
+        real(wp) :: solarm2(nx,ny), solarmin2(nx,ny), solarmax2(nx,ny), coszm2(nx,ny)
+        real(wp) :: solarp(nh), coszp(nh)
+        real(wp) :: solarmp, solarminp, solarmaxp, coszmp
+        real(dp) :: err_pt, err_2D
+        integer  :: i, j, day, jflat
+        type(insol_class) :: is1D, is2D
+
+        ! Days-2D vs 2D per-day
+        integer, parameter :: nd = 3
+        integer  :: days(nd)
+        real(wp) :: solar2d3(nx,ny,nd,nh), cosz2d3(nx,ny,nd,nh)
+        real(wp) :: solarm2d3(nx,ny,nd)
+        real(dp) :: err_days2D
+
+        do i = 1, nlat
+            lats1D(i) = -88.0_dp + (i-1)*176.0_dp/real(nlat-1,dp)
+        end do
+        lats2D = reshape(lats1D,[nx,ny])
+
+        call insol_init(is1D,lats1D,fldr=fldr,S0=S0_ref)
+        call insol_init(is2D,lats2D,fldr=fldr,S0=S0_ref)
+
+        err_pt = 0.0_dp
+        err_2D = 0.0_dp
+
+        do day = 20, 340, 40
+            call calc_insol_diurnal(is1D,day,0.0_dp,solar1,cosz1, &
+                                    solarm=solarm1,solarmin=solarmin1, &
+                                    solarmax=solarmax1,coszm=coszm1)
+            call calc_insol_diurnal(is2D,day,0.0_dp,solar2,cosz2, &
+                                    solarm=solarm2,solarmin=solarmin2, &
+                                    solarmax=solarmax2,coszm=coszm2)
+
+            do j = 1, ny
+            do i = 1, nx
+                jflat = i + (j-1)*nx
+
+                ! 2D vs 1D (same flattened latitude).
+                err_2D = max(err_2D, real(maxval(abs(solar2(i,j,:)-solar1(jflat,:))),dp))
+                err_2D = max(err_2D, real(maxval(abs(cosz2(i,j,:)-cosz1(jflat,:))),dp))
+                err_2D = max(err_2D, real(abs(solarm2(i,j)  -solarm1(jflat)),dp))
+                err_2D = max(err_2D, real(abs(solarmin2(i,j)-solarmin1(jflat)),dp))
+                err_2D = max(err_2D, real(abs(solarmax2(i,j)-solarmax1(jflat)),dp))
+                err_2D = max(err_2D, real(abs(coszm2(i,j)   -coszm1(jflat)),dp))
+            end do
+            end do
+
+            ! Point form (on the bare state `is`, which has no grid) vs 1D.
+            do i = 1, nlat
+                call calc_insol_diurnal(is,day,lats1D(i),0.0_dp,solarp,coszp, &
+                                        solarm=solarmp,solarmin=solarminp, &
+                                        solarmax=solarmaxp,coszm=coszmp)
+                err_pt = max(err_pt, real(maxval(abs(solarp-solar1(i,:))),dp))
+                err_pt = max(err_pt, real(maxval(abs(coszp -cosz1(i,:))),dp))
+                err_pt = max(err_pt, real(abs(solarmp-solarm1(i)),dp))
+                err_pt = max(err_pt, real(abs(coszmp -coszm1(i)),dp))
+            end do
+        end do
+
+        call check("diurnal point vs 1D interface", err_pt, tol_ref, &
+                   "max |pt - 1D| [W/m2 or cos]")
+        call check("diurnal 2D vs 1D interface", err_2D, tol_ref, &
+                   "max |2D - 1D| [W/m2 or cos]")
+
+        ! --- 2D _days reproduces the 2D per-day call ---
+        days = [45, 175, 285]
+        call calc_insol_diurnal_days(is2D,days,0.0_dp,solar2d3,cosz2d3,solarm=solarm2d3)
+
+        err_days2D = 0.0_dp
+        do i = 1, nd
+            call calc_insol_diurnal(is2D,days(i),0.0_dp,solar2,cosz2,solarm=solarm2)
+            err_days2D = max(err_days2D, real(maxval(abs(solar2d3(:,:,i,:)-solar2)),dp))
+            err_days2D = max(err_days2D, real(maxval(abs(cosz2d3(:,:,i,:)-cosz2)),dp))
+            err_days2D = max(err_days2D, real(maxval(abs(solarm2d3(:,:,i)-solarm2)),dp))
+        end do
+
+        call insol_end(is1D)
+        call insol_end(is2D)
+
+        call check("diurnal 2D _days matches 2D per-day", err_days2D, 0.0_dp, &
+                   "max |days - per-day|")
+
+    end subroutine test_diurnal_interfaces
+
+    subroutine test_coszm_kind()
+        ! coszm_kind selects how the mean cosine of the zenith angle is defined.
+        ! "flux" (the default) weights by insolation; "daytime" is the plain mean
+        ! over the daylit hours. The two must differ, the default must stay flux,
+        ! and each must match an independent estimate: flux from calc_insol_day,
+        ! daytime from averaging the sub-daily cosz samples over the daylit part.
+
+        implicit none
+
+        integer, parameter :: nlat = 46
+        integer, parameter :: nh   = 2880
+        real(dp) :: lats(nlat)
+        real(wp) :: solar(nlat,nh), cosz(nlat,nh)
+        real(wp) :: coszm_day(nlat)
+        real(wp) :: coszm_flux, coszm_dp, insol_pt
+        real(wp) :: sum_cz
+        integer  :: i, k, day, ndaylit
+        real(dp) :: err_daytime, max_diff, avg_sampled
+        type(insol_class) :: is_flux, is_day
+
+        do i = 1, nlat
+            lats(i) = -90.0_dp + (i-1)*180.0_dp/real(nlat-1,dp)
+        end do
+
+        call insol_init(is_flux,lats,fldr=fldr,S0=S0_ref)                       ! default
+        call insol_init(is_day, lats,fldr=fldr,S0=S0_ref,coszm_kind="daytime")
+
+        ! --- the two conventions must give distinguishable values ---
+        max_diff = 0.0_dp
+        do day = 1, 360, 15
+            do i = 1, nlat
+                call calc_insol_day(is_flux,insol_pt,day,lats(i),0.0_dp, &
+                                    elev_min=0.0_dp,coszm=coszm_flux)
+                call calc_insol_day(is_day,insol_pt,day,lats(i),0.0_dp, &
+                                    elev_min=0.0_dp,coszm=coszm_dp)
+                max_diff = max(max_diff, abs(real(coszm_flux-coszm_dp,dp)))
+            end do
+        end do
+
+        if (max_diff > 1.0e-3_dp) then
+            call pass("flux and daytime coszm differ")
+        else
+            call fail("flux and daytime coszm differ", &
+                      "the two conventions gave indistinguishable values")
+        end if
+
+        ! --- daytime coszm equals the mean of the daylit cosz samples ---
+        err_daytime = 0.0_dp
+        do day = 30, 330, 30
+            call calc_insol_diurnal(is_day,day,0.0_dp,solar,cosz,coszm=coszm_day)
+            do i = 1, nlat
+                sum_cz  = 0.0_wp
+                ndaylit = 0
+                do k = 1, nh
+                    if (cosz(i,k) > 0.0_wp) then
+                        sum_cz  = sum_cz + cosz(i,k)
+                        ndaylit = ndaylit + 1
+                    end if
+                end do
+                if (ndaylit > 0) then
+                    avg_sampled = real(sum_cz,dp)/real(ndaylit,dp)
+                    err_daytime = max(err_daytime, abs(avg_sampled-real(coszm_day(i),dp)))
+                end if
+            end do
+        end do
+
+        call insol_end(is_flux)
+        call insol_end(is_day)
+
+        call check("daytime coszm equals daylit-sample mean", err_daytime, 2.0e-3_dp, &
+                   "max |coszm - mean(daylit cosz)|")
+
+    end subroutine test_coszm_kind
+
+    subroutine test_daylength()
+        ! Daylength is the plain daily window, so it must equal 24*tday from the
+        ! elevation-threshold path exactly, be symmetric about the equator at the
+        ! equinox (~12 h everywhere), and take the values 24 and 0 at a summer and
+        ! winter pole. The point, vector and 2D interfaces must agree.
+
+        implicit none
+
+        integer, parameter :: nlat = 46
+        real(dp) :: lats(nlat)
+        real(wp) :: dl(nlat), dl_pt, insol_pt, tday_pt
+        real(dp) :: err_tday, err_equinox
+        integer  :: i, day
+        type(insol_class) :: isg
+        real(dp), parameter :: lats2D_flat(6) = [-60.0_dp,-30.0_dp,0.0_dp, &
+                                                  30.0_dp, 60.0_dp, 80.0_dp]
+        real(dp) :: lats2D(3,2)
+        real(wp) :: dl2D(3,2)
+        real(dp) :: err_2D
+
+        do i = 1, nlat
+            lats(i) = -90.0_dp + (i-1)*180.0_dp/real(nlat-1,dp)
+        end do
+
+        call insol_init(isg,lats,fldr=fldr,S0=S0_ref)
+
+        ! --- daylength == 24*tday, and vector == point ---
+        err_tday = 0.0_dp
+        do day = 1, 360, 13
+            call calc_daylength(isg,dl,day,0.0_dp)
+            do i = 1, nlat
+                call calc_insol_day(is,insol_pt,day,lats(i),0.0_dp, &
+                                    elev_min=0.0_dp,tday=tday_pt)
+                err_tday = max(err_tday, abs(real(dl(i),dp)-24.0_dp*real(tday_pt,dp)))
+                call calc_daylength(isg,dl_pt,day,lats(i),0.0_dp)
+                err_tday = max(err_tday, abs(real(dl(i)-dl_pt,dp)))
+            end do
+        end do
+
+        call check("daylength == 24*tday, vector == point", err_tday, tol_ref, &
+                   "max |daylength - 24*tday| [h]")
+
+        ! --- equinox: ~12 h at every latitude (day 80 straddles the equinox) ---
+        call calc_daylength(isg,dl,80,0.0_dp)
+        err_equinox = 0.0_dp
+        do i = 1, nlat
+            if (abs(lats(i)) <= 85.0_dp) &
+                err_equinox = max(err_equinox, abs(real(dl(i),dp)-12.0_dp))
+        end do
+        call check("equinox daylength ~12 h", err_equinox, 0.5_dp, &
+                   "max |daylength - 12| away from the poles [h]")
+
+        ! --- poles ---
+        call calc_daylength(isg,dl_pt,172, 90.0_dp,0.0_dp)
+        call check_exact("north pole midsummer daylength = 24 h", real(dl_pt,dp), 24.0_dp)
+        call calc_daylength(isg,dl_pt,172,-90.0_dp,0.0_dp)
+        call check_exact("south pole, north midsummer daylength = 0 h", real(dl_pt,dp), 0.0_dp)
+
+        call insol_end(isg)
+
+        ! --- 2D interface agrees with the point interface ---
+        lats2D = reshape(lats2D_flat,[3,2])
+        call insol_init(isg,lats2D,fldr=fldr,S0=S0_ref)
+        call calc_daylength(isg,dl2D,120,0.0_dp)
+        err_2D = 0.0_dp
+        do i = 1, 6
+            call calc_daylength(is,dl_pt,120,lats2D_flat(i),0.0_dp)
+            err_2D = max(err_2D, abs(real(dl2D(mod(i-1,3)+1,(i-1)/3+1)-dl_pt,dp)))
+        end do
+        call insol_end(isg)
+
+        call check("daylength point vs 2D interface", err_2D, tol_ref, &
+                   "max |dl_2D - dl_pt| [h]")
+
+    end subroutine test_daylength
 
     ! ------------------------------------------------------------------
     ! Suite 2: physical invariants
