@@ -47,7 +47,7 @@ insol_core = $(objdir)/insol_defs.o \
              $(objdir)/insolation.o
 
 # Irradiance: surface irradiance decomposition (DNI/DHI) for the renewable
-# energy applications. Independent of the core; see README.
+# energy applications. Shares the orbital solution (insol_orbit) with the core.
 insol_irradiance = $(objdir)/irradiance.o
 
 insol_libs = $(insol_core) $(insol_irradiance)
@@ -61,7 +61,7 @@ $(objdir)/insol_orbit.o: $(srcdir)/insol_orbit.f90 $(objdir)/insol_defs.o
 $(objdir)/insolation.o: $(srcdir)/insolation.f90 $(objdir)/insol_orbit.o
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
-$(objdir)/irradiance.o: $(srcdir)/irradiance.f90
+$(objdir)/irradiance.o: $(srcdir)/irradiance.f90 $(objdir)/insol_orbit.o
 	$(FC) $(DFLAGS) $(FFLAGS) -c -o $@ $<
 
 ###############################################
@@ -87,7 +87,7 @@ static: $(insol_libs)
 test: $(insol_core) $(insol_irradiance)
 	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_insol.x $(insol_core) $(testdir)/test_insol.f90
 	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_orbit.x $(insol_core) $(testdir)/test_orbit.f90
-	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_irradiance.x $(objdir)/insol_defs.o $(insol_irradiance) $(testdir)/test_irradiance.f90
+	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_irradiance.x $(objdir)/insol_defs.o $(objdir)/insol_orbit.o $(insol_irradiance) $(testdir)/test_irradiance.f90
 	@echo " "
 	@echo "    test_insol.x, test_orbit.x, test_irradiance.x are ready."
 	@echo " "

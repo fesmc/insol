@@ -12,16 +12,20 @@
 program test_irradiance
 
     use irradiance
+    use insol_orbit, only : orbit_class, orbit_init, orbit_end
 
     implicit none
+
+    type(orbit_class) :: orb
 
     character(len=*), parameter :: ref_file = "tests/reference/nrel_stations.txt"
 
     ! Bound on the RMSE of estimated vs measured DNI, over daytime records.
-    ! DISC is an empirical estimator; against station data its error is a large
+    ! DISC is an empirical estimator; against station data its error is a
     ! fraction of DNI, so this bounds the estimate rather than certifying it.
-    ! Set from the measured baseline with headroom, to catch regressions.
-    real(wp), parameter :: tol_rmse = 185.0_wp
+    ! The measured baseline is ~52 W/m2 RMSE (against a measured DNI RMS of
+    ! ~558); this is set with headroom to catch regressions.
+    real(wp), parameter :: tol_rmse = 65.0_wp
 
     integer :: n_pass = 0
     integer :: n_fail = 0
@@ -31,7 +35,12 @@ program test_irradiance
     write(*,*) " irradiance tests"
     write(*,*) "=============================================="
 
+    ! The NSRDB records span real calendar years; use the real-date geometry.
+    call orbit_init(orb,fldr="input",day_year=365)
+
     call test_dni_vs_nrel()
+
+    call orbit_end(orb)
 
     write(*,*)
     write(*,"(a,i0,a,i0,a)") "  ", n_pass, " passed, ", n_fail, " failed"
@@ -87,10 +96,9 @@ contains
             ! NSRDB pressure is in millibar; the module expects pascals.
             pres_pa = pres_mbar*100.0_wp
 
-            ! hour_utc counts from 00:00 UTC on 1 January, so pass it as the hour
-            ! of the year with a zero time zone. tisr < 0 tells DISC to compute
-            ! the top-of-atmosphere irradiance itself.
-            call calc_dni_disc(dni,hour_utc,lat,lon,0.0_wp,ghi,pres_pa,-1.0_wp, &
+            ! hour_utc counts from 00:00 UTC on 1 January of `year`, which is the
+            ! convention calc_dni_disc expects.
+            call calc_dni_disc(orb,dni,year,hour_utc,lat,lon,ghi,pres_pa, &
                                print_diagnostics=.FALSE.)
 
             err      = dni-dni_ref

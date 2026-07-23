@@ -355,7 +355,7 @@ contains
     end subroutine calc_solar_position
 
     subroutine calc_solar_position_date(orb,cosz,year,month,day,hour_utc,lat,lon, &
-                                        decl,eqtime)
+                                        decl,eqtime,dist2)
         ! Cosine of the solar zenith angle at a real calendar date and time.
         !
         ! For present-day work -- a climate model running on real time, or the
@@ -365,6 +365,8 @@ contains
         ! valid for any year they cover.
         !
         ! `hour_utc` is the hour of the day in UTC; `lon` is degrees east.
+        ! `dist2` is the inverse-square Sun-Earth distance factor (a/r)^2, by
+        ! which the top-of-atmosphere irradiance scales.
 
         implicit none
 
@@ -376,11 +378,12 @@ contains
         real(dp),          intent(IN)  :: lon        ! [degrees east]
         real(dp),          intent(OUT), optional :: decl
         real(dp),          intent(OUT), optional :: eqtime
+        real(dp),          intent(OUT), optional :: dist2
 
         ! Local variables
         real(dp) :: jd, time_bp
         real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
-        real(dp) :: decl_now, dist2, eqtime_now
+        real(dp) :: decl_now, dist2_now, eqtime_now
         real(dp) :: hour_angle, latrad
 
         jd = calc_julian_day(year,month,day) + hour_utc/24.0_dp
@@ -390,7 +393,7 @@ contains
         time_bp = real(year,dp) - 1950.0_dp
 
         call calc_orbital_par(orb,time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE)
-        call calc_solar_geometry_date(decl_now,dist2,eqtime_now,jd,ECC,XOBCH,ZAVEXPE)
+        call calc_solar_geometry_date(decl_now,dist2_now,eqtime_now,jd,ECC,XOBCH,ZAVEXPE)
 
         ! Hour angle: zero at local apparent noon. The Julian Day begins at noon,
         ! so shifting by half a day gives the fraction elapsed since midnight UT.
@@ -403,6 +406,7 @@ contains
 
         if (present(decl))   decl   = decl_now
         if (present(eqtime)) eqtime = eqtime_now
+        if (present(dist2))  dist2  = dist2_now
 
         return
 
