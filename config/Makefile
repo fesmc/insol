@@ -84,11 +84,12 @@ static: $(insol_libs)
 
 # Regression tests for the core library. Deliberately free of netCDF and
 # fesm-utils so the physics can be checked with only a Fortran compiler.
-test: $(insol_core)
-	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_insol.x $^ $(testdir)/test_insol.f90
-	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_orbit.x $^ $(testdir)/test_orbit.f90
+test: $(insol_core) $(insol_irradiance)
+	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_insol.x $(insol_core) $(testdir)/test_insol.f90
+	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_orbit.x $(insol_core) $(testdir)/test_orbit.f90
+	$(FC) $(DFLAGS) $(FFLAGS) -o $(bindir)/test_irradiance.x $(objdir)/insol_defs.o $(insol_irradiance) $(testdir)/test_irradiance.f90
 	@echo " "
-	@echo "    $(bindir)/test_insol.x, $(bindir)/test_orbit.x are ready."
+	@echo "    test_insol.x, test_orbit.x, test_irradiance.x are ready."
 	@echo " "
 
 # Run the regression tests. Must be run from the repository root so that the
@@ -96,6 +97,7 @@ test: $(insol_core)
 check: test
 	@$(bindir)/test_insol.x
 	@$(bindir)/test_orbit.x
+	@$(bindir)/test_irradiance.x
 
 # Irradiance / DNI tests. These read netCDF input, so they need fesm-utils.
 test-dni: $(insol_libs)
