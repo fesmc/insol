@@ -75,9 +75,13 @@ $(objdir)/irradiance.o: $(srcdir)/irradiance.f90 $(objdir)/insol_orbit.o
 all: static
 
 # Static library
-static: $(insol_libs)
-	ar rc $(objdir)/libinsol.a $(insol_libs)
-	ranlib $(objdir)/libinsol.a
+static: $(objdir)/libinsol.a
+
+# The archive is a file target, so dependants (e.g. yelmox objects that use
+# the library) rebuild only when it actually changes.
+$(objdir)/libinsol.a: $(insol_libs)
+	ar rc $@ $(insol_libs)
+	ranlib $@
 	@echo " "
 	@echo "    $(objdir)/libinsol.a is ready."
 	@echo " "

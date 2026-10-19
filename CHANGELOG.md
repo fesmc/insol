@@ -7,6 +7,9 @@ Notable changes to `insol`, newest first. Versions are annotated git tags.
 Additive: fixed orbits. Backwards compatible — `time_bp` calls are unchanged
 and return bit-for-bit the same values.
 
+Build: `libinsol/include/libinsol.a` is a file target of `make static` (was a phony
+target that re-archived on every call, so dependants in a host build relinked each time).
+
 ### Added
 
 - `orbit_pars_class`, the orbital elements (`ecc`, `obl`, `per`) at one moment,
