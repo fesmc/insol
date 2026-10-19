@@ -2,6 +2,32 @@
 
 Notable changes to `insol`, newest first. Versions are annotated git tags.
 
+## Unreleased
+
+Additive: fixed orbits. Backwards compatible — `time_bp` calls are unchanged
+and return bit-for-bit the same values.
+
+Build: `libinsol/include/libinsol.a` is a file target of `make static` (was a phony
+target that re-archived on every call, so dependants in a host build relinked each time).
+
+### Added
+
+- `orbit_pars_class`, the orbital elements (`ecc`, `obl`, `per`) at one moment,
+  with two constructors: `orbit_pars_at(is,time_bp)` reads them from the tables
+  (also takes an `orbit_class`), `orbit_pars_fixed(ecc,obl,per)` takes them as
+  given, for a fixed orbit.
+- Every routine taking `time_bp` — `calc_insol_day`, `calc_insol_days`,
+  `calc_insol_ave`, `calc_insol_diurnal`, `calc_insol_diurnal_days`,
+  `calc_daylength` — also takes an `orbit_pars_class` in its place. The
+  `time_bp` form is `orbit_pars_at` followed by the elements form.
+
+### Changed
+
+- The step from the elements to the time and longitude of perihelion is
+  factored out of `calc_orbital_par` into `calc_perihelion`, shared by table
+  and fixed orbits. The calendar enters only there, so one set of elements is
+  valid with any `day_year`.
+
 ## v1.1.0
 
 Additive release: sub-daily and daylength routines, and a selectable mean-cosine
