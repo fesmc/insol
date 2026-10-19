@@ -25,7 +25,8 @@ module insolation
     use insol_defs, only : sp, dp, wp, pi, deg_to_rad => degrees_to_radians, &
                            S0_default, day_year_default
     use insol_orbit, only : orbit_class, orbit_init, orbit_end, &
-                            calc_orbital_par, calc_solar_geometry
+                            orbit_pars_class, orbit_pars_at, orbit_pars_fixed, &
+                            calc_perihelion, calc_solar_geometry
 
     implicit none
 
@@ -68,10 +69,19 @@ module insolation
     ! Daily-mean insolation. Resolved on the rank of `insol`: rank 1 or 2 with
     ! no latitude argument uses the grid held in `is`; rank 0 with an explicit
     ! latitude is a one-off point query needing no grid.
+    !
+    ! Every routine below that takes `time_bp` [yr, relative to 1950] also
+    ! takes, in its place, the orbital elements as an orbit_pars_class: from
+    ! the tables at a time (orbit_pars_at) or given (orbit_pars_fixed), for a
+    ! fixed orbit. The time_bp form is orbit_pars_at followed by the elements
+    ! form, so both run through the same code.
     interface calc_insol_day
         module procedure calc_insol_day_1D
         module procedure calc_insol_day_2D
         module procedure calc_insol_day_pt
+        module procedure calc_insol_day_1D_orbit
+        module procedure calc_insol_day_2D_orbit
+        module procedure calc_insol_day_pt_orbit
     end interface
 
     ! Daily-mean insolation for several days at once. `insol` carries one
@@ -79,12 +89,16 @@ module insolation
     interface calc_insol_days
         module procedure calc_insol_days_1D
         module procedure calc_insol_days_2D
+        module procedure calc_insol_days_1D_orbit
+        module procedure calc_insol_days_2D_orbit
     end interface
 
     ! Insolation averaged over a range of days (eg. a season or the year).
     interface calc_insol_ave
         module procedure calc_insol_ave_1D
         module procedure calc_insol_ave_2D
+        module procedure calc_insol_ave_1D_orbit
+        module procedure calc_insol_ave_2D_orbit
     end interface
 
     ! Sub-daily (diurnal) insolation and zenith angle over the 1D grid, sampled
@@ -95,11 +109,16 @@ module insolation
         module procedure calc_insol_diurnal_1D
         module procedure calc_insol_diurnal_2D
         module procedure calc_insol_diurnal_pt
+        module procedure calc_insol_diurnal_1D_orbit
+        module procedure calc_insol_diurnal_2D_orbit
+        module procedure calc_insol_diurnal_pt_orbit
     end interface
 
     interface calc_insol_diurnal_days
         module procedure calc_insol_diurnal_days_1D
         module procedure calc_insol_diurnal_days_2D
+        module procedure calc_insol_diurnal_days_1D_orbit
+        module procedure calc_insol_diurnal_days_2D_orbit
     end interface
 
     ! Length of the daylit part of the day, in hours.
@@ -107,6 +126,15 @@ module insolation
         module procedure calc_daylength_1D
         module procedure calc_daylength_2D
         module procedure calc_daylength_pt
+        module procedure calc_daylength_1D_orbit
+        module procedure calc_daylength_2D_orbit
+        module procedure calc_daylength_pt_orbit
+    end interface
+
+    ! Orbital elements from the tables of a state at a time; extends the
+    ! orbit_class form in insol_orbit.
+    interface orbit_pars_at
+        module procedure orbit_pars_at_is
     end interface
 
     private
@@ -114,6 +142,9 @@ module insolation
     ! of the kind the interface exchanges.
     public :: sp, dp, wp
     public :: insol_class
+    public :: orbit_pars_class
+    public :: orbit_pars_at
+    public :: orbit_pars_fixed
     public :: insol_init
     public :: insol_end
     public :: calc_insol_day
@@ -212,9 +243,29 @@ contains
 ! Daily-mean insolation
 
     subroutine calc_insol_day_pt(is,insol,day,lat,time_bp,elev_min,tday,coszm)
+        ! As calc_insol_day_pt_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: lat
+        real(dp),          intent(IN)  :: time_bp
+        real(dp),          intent(IN),  optional :: elev_min
+        real(wp),          intent(OUT), optional :: tday
+        real(wp),          intent(OUT), optional :: coszm
+
+        call calc_insol_day_pt_orbit(is,insol,day,lat,orbit_pars_at(is,time_bp), &
+                                     elev_min=elev_min,tday=tday,coszm=coszm)
+
+        return
+
+    end subroutine calc_insol_day_pt
+
+    subroutine calc_insol_day_pt_orbit(is,insol,day,lat,orbit,elev_min,tday,coszm)
         ! Daily-mean insolation at one latitude. Needs no latitude grid, so it
         ! works with a state initialized by insol_init(is) alone.
-        ! time_bp = years before present (present == 1950)
         !
         ! `insol` is the mean over the whole 24-hour day. With `elev_min` given,
         ! only the part of the day when the sun stands higher than `elev_min`
@@ -231,7 +282,7 @@ contains
         real(wp),          intent(OUT) :: insol
         integer,           intent(IN)  :: day
         real(dp),          intent(IN)  :: lat
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(dp),          intent(IN),  optional :: elev_min   ! [degrees]
         real(wp),          intent(OUT), optional :: tday       ! fraction of day above elev_min
         real(wp),          intent(OUT), optional :: coszm      ! flux-weighted mean cos(zenith)
@@ -243,7 +294,7 @@ contains
         real(dp) :: sinlat1(1), coslat1(1), elev1(1)
         real(wp) :: insol1(1), tday1(1), coszm1(1)
 
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
 
         latrad     = lat*deg_to_rad
         sinlat1(1) = sin(latrad)
@@ -261,9 +312,35 @@ contains
 
         return
 
-    end subroutine calc_insol_day_pt
+    end subroutine calc_insol_day_pt_orbit
 
     subroutine calc_insol_day_1D(is,insol,day,time_bp,elev_min,tday,coszm)
+        ! As calc_insol_day_1D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+        real(dp),          intent(IN),  optional :: elev_min(:)
+        real(wp),          intent(OUT), optional :: tday(:)
+        real(wp),          intent(OUT), optional :: coszm(:)
+
+        ! Branch rather than forward an absent elev_min (see calc_insol_day_1D_orbit).
+        if (present(elev_min)) then
+            call calc_insol_day_1D_orbit(is,insol,day,orbit_pars_at(is,time_bp), &
+                                         elev_min=elev_min,tday=tday,coszm=coszm)
+        else
+            call calc_insol_day_1D_orbit(is,insol,day,orbit_pars_at(is,time_bp), &
+                                         tday=tday,coszm=coszm)
+        end if
+
+        return
+
+    end subroutine calc_insol_day_1D
+
+    subroutine calc_insol_day_1D_orbit(is,insol,day,orbit,elev_min,tday,coszm)
         ! Daily-mean insolation over the 1D latitude grid held in `is`. See
         ! calc_insol_day_pt for the meaning of the optional arguments; here
         ! `elev_min` is one threshold per grid point, as dEBM estimates it
@@ -274,7 +351,7 @@ contains
         type(insol_class), intent(IN)  :: is
         real(wp),          intent(OUT) :: insol(:)
         integer,           intent(IN)  :: day
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(dp),          intent(IN),  optional :: elev_min(:)
         real(wp),          intent(OUT), optional :: tday(:)
         real(wp),          intent(OUT), optional :: coszm(:)
@@ -287,7 +364,7 @@ contains
 
         ! The solar geometry does not depend on latitude, so it is evaluated
         ! once and reused for every grid point.
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
 
         ! Branch rather than forward the optionals: an absent optional passed on
         ! to another optional dummy is a gfortran hazard, and it keeps the common
@@ -303,9 +380,35 @@ contains
 
         return
 
-    end subroutine calc_insol_day_1D
+    end subroutine calc_insol_day_1D_orbit
 
     subroutine calc_insol_day_2D(is,insol,day,time_bp,elev_min,tday,coszm)
+        ! As calc_insol_day_2D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+        real(dp),          intent(IN),  optional :: elev_min(:,:)
+        real(wp),          intent(OUT), optional :: tday(:,:)
+        real(wp),          intent(OUT), optional :: coszm(:,:)
+
+        ! Branch rather than forward an absent elev_min (see calc_insol_day_1D_orbit).
+        if (present(elev_min)) then
+            call calc_insol_day_2D_orbit(is,insol,day,orbit_pars_at(is,time_bp), &
+                                         elev_min=elev_min,tday=tday,coszm=coszm)
+        else
+            call calc_insol_day_2D_orbit(is,insol,day,orbit_pars_at(is,time_bp), &
+                                         tday=tday,coszm=coszm)
+        end if
+
+        return
+
+    end subroutine calc_insol_day_2D
+
+    subroutine calc_insol_day_2D_orbit(is,insol,day,orbit,elev_min,tday,coszm)
         ! Daily-mean insolation over the 2D latitude grid held in `is`. See
         ! calc_insol_day_pt for the optional arguments.
 
@@ -314,7 +417,7 @@ contains
         type(insol_class), intent(IN)  :: is
         real(wp),          intent(OUT) :: insol(:,:)
         integer,           intent(IN)  :: day
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(dp),          intent(IN),  optional :: elev_min(:,:)
         real(wp),          intent(OUT), optional :: tday(:,:)
         real(wp),          intent(OUT), optional :: coszm(:,:)
@@ -327,7 +430,7 @@ contains
         call check_grid(is,size(insol),2,"calc_insol_day")
         if (present(elev_min)) call check_elev_min(size(elev_min),is%n_lat,"calc_insol_day")
 
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
 
         ! Flatten the 2D optionals to the grid vector, call once, reshape back.
         ! Passing an absent optional straight through keeps the fast path.
@@ -347,12 +450,28 @@ contains
 
         return
 
-    end subroutine calc_insol_day_2D
+    end subroutine calc_insol_day_2D_orbit
 
 ! =====================================================================================================
 ! Daily-mean insolation over several days
 
     subroutine calc_insol_days_1D(is,insol,days,time_bp)
+        ! As calc_insol_days_1D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)
+        integer,           intent(IN)  :: days(:)
+        real(dp),          intent(IN)  :: time_bp
+
+        call calc_insol_days_1D_orbit(is,insol,days,orbit_pars_at(is,time_bp))
+
+        return
+
+    end subroutine calc_insol_days_1D
+
+    subroutine calc_insol_days_1D_orbit(is,insol,days,orbit)
         ! Daily-mean insolation over the 1D latitude grid, for each day in `days`.
 
         implicit none
@@ -360,7 +479,7 @@ contains
         type(insol_class), intent(IN)  :: is
         real(wp),          intent(OUT) :: insol(:,:)     ! [lat,day]
         integer,           intent(IN)  :: days(:)
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
 
         ! Local variables
         integer  :: q
@@ -370,15 +489,31 @@ contains
         call check_ndays(size(insol,2),size(days),"calc_insol_days")
 
         do q = 1, size(days)
-            call calc_solar_geometry_day(is,decl,dist2,days(q),time_bp)
+            call calc_solar_geometry_day(is,decl,dist2,days(q),orbit)
             call calc_insol_grid(is,insol(:,q),decl,dist2)
         end do
 
         return
 
-    end subroutine calc_insol_days_1D
+    end subroutine calc_insol_days_1D_orbit
 
     subroutine calc_insol_days_2D(is,insol,days,time_bp)
+        ! As calc_insol_days_2D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:,:)
+        integer,           intent(IN)  :: days(:)
+        real(dp),          intent(IN)  :: time_bp
+
+        call calc_insol_days_2D_orbit(is,insol,days,orbit_pars_at(is,time_bp))
+
+        return
+
+    end subroutine calc_insol_days_2D
+
+    subroutine calc_insol_days_2D_orbit(is,insol,days,orbit)
         ! Daily-mean insolation over the 2D latitude grid, for each day in `days`.
 
         implicit none
@@ -386,7 +521,7 @@ contains
         type(insol_class), intent(IN)  :: is
         real(wp),          intent(OUT) :: insol(:,:,:)   ! [x,y,day]
         integer,           intent(IN)  :: days(:)
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
 
         ! Local variables
         integer  :: q
@@ -397,20 +532,20 @@ contains
         call check_ndays(size(insol,3),size(days),"calc_insol_days")
 
         do q = 1, size(days)
-            call calc_solar_geometry_day(is,decl,dist2,days(q),time_bp)
+            call calc_solar_geometry_day(is,decl,dist2,days(q),orbit)
             call calc_insol_grid(is,insol1D,decl,dist2)
             insol(:,:,q) = reshape(insol1D,[is%n1,is%n2])
         end do
 
         return
 
-    end subroutine calc_insol_days_2D
+    end subroutine calc_insol_days_2D_orbit
 
 ! =====================================================================================================
 ! Insolation averaged over a range of days
 
     subroutine calc_insol_ave_1D(is,insol,day_range,time_bp,step)
-        ! Mean insolation over an inclusive range of days, on the 1D grid.
+        ! As calc_insol_ave_1D_orbit, with the orbit from the tables at time_bp.
 
         implicit none
 
@@ -418,6 +553,23 @@ contains
         real(wp),          intent(OUT) :: insol(:)
         integer,           intent(IN)  :: day_range(2)
         real(dp),          intent(IN)  :: time_bp
+        integer,           intent(IN), optional :: step
+
+        call calc_insol_ave_1D_orbit(is,insol,day_range,orbit_pars_at(is,time_bp),step=step)
+
+        return
+
+    end subroutine calc_insol_ave_1D
+
+    subroutine calc_insol_ave_1D_orbit(is,insol,day_range,orbit,step)
+        ! Mean insolation over an inclusive range of days, on the 1D grid.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:)
+        integer,           intent(IN)  :: day_range(2)
+        type(orbit_pars_class), intent(IN) :: orbit
         integer,           intent(IN), optional :: step
 
         ! Local variables
@@ -435,7 +587,7 @@ contains
         ndays = 0
 
         do day = day_range(1), day_range(2), day_step
-            call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+            call calc_solar_geometry_day(is,decl,dist2,day,orbit)
             call calc_insol_grid(is,insol_day,decl,dist2)
             insol = insol + insol_day
             ndays = ndays + 1
@@ -445,10 +597,10 @@ contains
 
         return
 
-    end subroutine calc_insol_ave_1D
+    end subroutine calc_insol_ave_1D_orbit
 
     subroutine calc_insol_ave_2D(is,insol,day_range,time_bp,step)
-        ! Mean insolation over an inclusive range of days, on the 2D grid.
+        ! As calc_insol_ave_2D_orbit, with the orbit from the tables at time_bp.
 
         implicit none
 
@@ -456,6 +608,23 @@ contains
         real(wp),          intent(OUT) :: insol(:,:)
         integer,           intent(IN)  :: day_range(2)
         real(dp),          intent(IN)  :: time_bp
+        integer,           intent(IN), optional :: step
+
+        call calc_insol_ave_2D_orbit(is,insol,day_range,orbit_pars_at(is,time_bp),step=step)
+
+        return
+
+    end subroutine calc_insol_ave_2D
+
+    subroutine calc_insol_ave_2D_orbit(is,insol,day_range,orbit,step)
+        ! Mean insolation over an inclusive range of days, on the 2D grid.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: insol(:,:)
+        integer,           intent(IN)  :: day_range(2)
+        type(orbit_pars_class), intent(IN) :: orbit
         integer,           intent(IN), optional :: step
 
         ! Local variables
@@ -473,7 +642,7 @@ contains
         ndays   = 0
 
         do day = day_range(1), day_range(2), day_step
-            call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+            call calc_solar_geometry_day(is,decl,dist2,day,orbit)
             call calc_insol_grid(is,insol_day,decl,dist2)
             insol1D = insol1D + insol_day
             ndays   = ndays + 1
@@ -483,12 +652,12 @@ contains
 
         return
 
-    end subroutine calc_insol_ave_2D
+    end subroutine calc_insol_ave_2D_orbit
 
 ! =====================================================================================================
 ! Sub-daily (diurnal) insolation
 
-    subroutine calc_insol_diurnal_core(is,day,time_bp,sinlat,coslat, &
+    subroutine calc_insol_diurnal_core(is,day,orbit,sinlat,coslat, &
                                        solar,cosz,solarm,solarmin,solarmax,coszm)
         ! Shared worker: fills every diurnal and aggregate output for one day over
         ! a flat latitude vector. The public wrappers reshape their point or 2D
@@ -513,7 +682,7 @@ contains
 
         type(insol_class), intent(IN)  :: is
         integer,           intent(IN)  :: day
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(dp),          intent(IN),  contiguous :: sinlat(:)     ! [lat]
         real(dp),          intent(IN),  contiguous :: coslat(:)     ! [lat]
         real(wp),          intent(OUT) :: solar(:,:)     ! [lat,hour] insolation [W/m2]
@@ -531,7 +700,7 @@ contains
         nlat = size(sinlat)
         nh   = size(solar,2)
 
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
 
         sindec = sin(decl)
         cosdec = cos(decl)
@@ -569,6 +738,31 @@ contains
 
     subroutine calc_insol_diurnal_pt(is,day,lat,time_bp,solar,cosz, &
                                      solarm,solarmin,solarmax,coszm)
+        ! As calc_insol_diurnal_pt_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: lat
+        real(dp),          intent(IN)  :: time_bp
+        real(wp),          intent(OUT) :: solar(:)
+        real(wp),          intent(OUT) :: cosz(:)
+        real(wp),          intent(OUT), optional :: solarm
+        real(wp),          intent(OUT), optional :: solarmin
+        real(wp),          intent(OUT), optional :: solarmax
+        real(wp),          intent(OUT), optional :: coszm
+
+        call calc_insol_diurnal_pt_orbit(is,day,lat,orbit_pars_at(is,time_bp),solar,cosz, &
+                                         solarm=solarm,solarmin=solarmin, &
+                                         solarmax=solarmax,coszm=coszm)
+
+        return
+
+    end subroutine calc_insol_diurnal_pt
+
+    subroutine calc_insol_diurnal_pt_orbit(is,day,lat,orbit,solar,cosz, &
+                                     solarm,solarmin,solarmax,coszm)
         ! Diurnal insolation and cosine of the zenith angle at one latitude. Needs
         ! no grid, so it works on a bare state. `solar` and `cosz` are [n_hour];
         ! the aggregates are scalars. The mean cosine follows the state's
@@ -579,7 +773,7 @@ contains
         type(insol_class), intent(IN)  :: is
         integer,           intent(IN)  :: day
         real(dp),          intent(IN)  :: lat
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(wp),          intent(OUT) :: solar(:)       ! [hour]
         real(wp),          intent(OUT) :: cosz(:)        ! [hour]
         real(wp),          intent(OUT), optional :: solarm
@@ -603,7 +797,7 @@ contains
         sinlat1(1) = sin(latrad)
         coslat1(1) = cos(latrad)
 
-        call calc_insol_diurnal_core(is,day,time_bp,sinlat1,coslat1,solar2,cosz2, &
+        call calc_insol_diurnal_core(is,day,orbit,sinlat1,coslat1,solar2,cosz2, &
                                      solarm_l,solarmin_l,solarmax_l,coszm_l)
 
         solar = solar2(1,:)
@@ -617,9 +811,32 @@ contains
 
         return
 
-    end subroutine calc_insol_diurnal_pt
+    end subroutine calc_insol_diurnal_pt_orbit
 
     subroutine calc_insol_diurnal_1D(is,day,time_bp,solar,cosz, &
+                                     solarm,solarmin,solarmax,coszm)
+        ! As calc_insol_diurnal_1D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+        real(wp),          intent(OUT) :: solar(:,:)
+        real(wp),          intent(OUT) :: cosz(:,:)
+        real(wp),          intent(OUT), optional :: solarm(:)
+        real(wp),          intent(OUT), optional :: solarmin(:)
+        real(wp),          intent(OUT), optional :: solarmax(:)
+        real(wp),          intent(OUT), optional :: coszm(:)
+
+        call calc_insol_diurnal_1D_orbit(is,day,orbit_pars_at(is,time_bp),solar,cosz, &
+                solarm=solarm,solarmin=solarmin,solarmax=solarmax,coszm=coszm)
+
+        return
+
+    end subroutine calc_insol_diurnal_1D
+
+    subroutine calc_insol_diurnal_1D_orbit(is,day,orbit,solar,cosz, &
                                      solarm,solarmin,solarmax,coszm)
         ! Diurnal insolation and cosine of the zenith angle over the 1D grid, for
         ! one day. `solar` and `cosz` are [n_lat, n_hour]; the number of sub-daily
@@ -630,7 +847,7 @@ contains
 
         type(insol_class), intent(IN)  :: is
         integer,           intent(IN)  :: day
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(wp),          intent(OUT) :: solar(:,:)
         real(wp),          intent(OUT) :: cosz(:,:)
         real(wp),          intent(OUT), optional :: solarm(:)
@@ -646,7 +863,7 @@ contains
         call check_diurnal(size(solar,2),size(cosz,2),size(solar,1),size(cosz,1), &
                            "calc_insol_diurnal")
 
-        call calc_insol_diurnal_core(is,day,time_bp,is%sinlat,is%coslat,solar,cosz, &
+        call calc_insol_diurnal_core(is,day,orbit,is%sinlat,is%coslat,solar,cosz, &
                                      solarm_l,solarmin_l,solarmax_l,coszm_l)
 
         if (present(solarm))   solarm   = solarm_l
@@ -656,9 +873,32 @@ contains
 
         return
 
-    end subroutine calc_insol_diurnal_1D
+    end subroutine calc_insol_diurnal_1D_orbit
 
     subroutine calc_insol_diurnal_2D(is,day,time_bp,solar,cosz, &
+                                     solarm,solarmin,solarmax,coszm)
+        ! As calc_insol_diurnal_2D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: time_bp
+        real(wp),          intent(OUT) :: solar(:,:,:)
+        real(wp),          intent(OUT) :: cosz(:,:,:)
+        real(wp),          intent(OUT), optional :: solarm(:,:)
+        real(wp),          intent(OUT), optional :: solarmin(:,:)
+        real(wp),          intent(OUT), optional :: solarmax(:,:)
+        real(wp),          intent(OUT), optional :: coszm(:,:)
+
+        call calc_insol_diurnal_2D_orbit(is,day,orbit_pars_at(is,time_bp),solar,cosz, &
+                solarm=solarm,solarmin=solarmin,solarmax=solarmax,coszm=coszm)
+
+        return
+
+    end subroutine calc_insol_diurnal_2D
+
+    subroutine calc_insol_diurnal_2D_orbit(is,day,orbit,solar,cosz, &
                                      solarm,solarmin,solarmax,coszm)
         ! Diurnal insolation and cosine of the zenith angle over the 2D grid, for
         ! one day. `solar` and `cosz` are [n1, n2, n_hour]; the aggregates are
@@ -669,7 +909,7 @@ contains
 
         type(insol_class), intent(IN)  :: is
         integer,           intent(IN)  :: day
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(wp),          intent(OUT) :: solar(:,:,:)
         real(wp),          intent(OUT) :: cosz(:,:,:)
         real(wp),          intent(OUT), optional :: solarm(:,:)
@@ -691,7 +931,7 @@ contains
         nh = size(solar,3)
         allocate(solar2(is%n_lat,nh),cosz2(is%n_lat,nh))
 
-        call calc_insol_diurnal_core(is,day,time_bp,is%sinlat,is%coslat,solar2,cosz2, &
+        call calc_insol_diurnal_core(is,day,orbit,is%sinlat,is%coslat,solar2,cosz2, &
                                      solarm_l,solarmin_l,solarmax_l,coszm_l)
 
         solar = reshape(solar2,[is%n1,is%n2,nh])
@@ -705,9 +945,32 @@ contains
 
         return
 
-    end subroutine calc_insol_diurnal_2D
+    end subroutine calc_insol_diurnal_2D_orbit
 
     subroutine calc_insol_diurnal_days_1D(is,days,time_bp,solar,cosz, &
+                                          solarm,solarmin,solarmax,coszm)
+        ! As calc_insol_diurnal_days_1D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        integer,           intent(IN)  :: days(:)
+        real(dp),          intent(IN)  :: time_bp
+        real(wp),          intent(OUT) :: solar(:,:,:)
+        real(wp),          intent(OUT) :: cosz(:,:,:)
+        real(wp),          intent(OUT), optional :: solarm(:,:)
+        real(wp),          intent(OUT), optional :: solarmin(:,:)
+        real(wp),          intent(OUT), optional :: solarmax(:,:)
+        real(wp),          intent(OUT), optional :: coszm(:,:)
+
+        call calc_insol_diurnal_days_1D_orbit(is,days,orbit_pars_at(is,time_bp),solar,cosz, &
+                solarm=solarm,solarmin=solarmin,solarmax=solarmax,coszm=coszm)
+
+        return
+
+    end subroutine calc_insol_diurnal_days_1D
+
+    subroutine calc_insol_diurnal_days_1D_orbit(is,days,orbit,solar,cosz, &
                                           solarm,solarmin,solarmax,coszm)
         ! As calc_insol_diurnal, for each day in `days` at once. `solar` and
         ! `cosz` are [n_lat, n_days, n_hour]; the optional aggregates are
@@ -717,7 +980,7 @@ contains
 
         type(insol_class), intent(IN)  :: is
         integer,           intent(IN)  :: days(:)
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(wp),          intent(OUT) :: solar(:,:,:)
         real(wp),          intent(OUT) :: cosz(:,:,:)
         real(wp),          intent(OUT), optional :: solarm(:,:)
@@ -740,7 +1003,7 @@ contains
         allocate(solar2(is%n_lat,nh),cosz2(is%n_lat,nh))
 
         do q = 1, size(days)
-            call calc_insol_diurnal_core(is,days(q),time_bp,is%sinlat,is%coslat, &
+            call calc_insol_diurnal_core(is,days(q),orbit,is%sinlat,is%coslat, &
                                          solar2,cosz2, &
                                          solarm_l,solarmin_l,solarmax_l,coszm_l)
             solar(:,q,:) = solar2
@@ -755,9 +1018,32 @@ contains
 
         return
 
-    end subroutine calc_insol_diurnal_days_1D
+    end subroutine calc_insol_diurnal_days_1D_orbit
 
     subroutine calc_insol_diurnal_days_2D(is,days,time_bp,solar,cosz, &
+                                          solarm,solarmin,solarmax,coszm)
+        ! As calc_insol_diurnal_days_2D_orbit, with the orbit from the tables at time_bp.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        integer,           intent(IN)  :: days(:)
+        real(dp),          intent(IN)  :: time_bp
+        real(wp),          intent(OUT) :: solar(:,:,:,:)
+        real(wp),          intent(OUT) :: cosz(:,:,:,:)
+        real(wp),          intent(OUT), optional :: solarm(:,:,:)
+        real(wp),          intent(OUT), optional :: solarmin(:,:,:)
+        real(wp),          intent(OUT), optional :: solarmax(:,:,:)
+        real(wp),          intent(OUT), optional :: coszm(:,:,:)
+
+        call calc_insol_diurnal_days_2D_orbit(is,days,orbit_pars_at(is,time_bp),solar,cosz, &
+                solarm=solarm,solarmin=solarmin,solarmax=solarmax,coszm=coszm)
+
+        return
+
+    end subroutine calc_insol_diurnal_days_2D
+
+    subroutine calc_insol_diurnal_days_2D_orbit(is,days,orbit,solar,cosz, &
                                           solarm,solarmin,solarmax,coszm)
         ! As calc_insol_diurnal on the 2D grid, for each day in `days`. `solar`
         ! and `cosz` are [n1, n2, n_days, n_hour]; the aggregates are
@@ -767,7 +1053,7 @@ contains
 
         type(insol_class), intent(IN)  :: is
         integer,           intent(IN)  :: days(:)
-        real(dp),          intent(IN)  :: time_bp
+        type(orbit_pars_class), intent(IN) :: orbit
         real(wp),          intent(OUT) :: solar(:,:,:,:)
         real(wp),          intent(OUT) :: cosz(:,:,:,:)
         real(wp),          intent(OUT), optional :: solarm(:,:,:)
@@ -791,7 +1077,7 @@ contains
         allocate(solar2(is%n_lat,nh),cosz2(is%n_lat,nh))
 
         do q = 1, size(days)
-            call calc_insol_diurnal_core(is,days(q),time_bp,is%sinlat,is%coslat, &
+            call calc_insol_diurnal_core(is,days(q),orbit,is%sinlat,is%coslat, &
                                          solar2,cosz2, &
                                          solarm_l,solarmin_l,solarmax_l,coszm_l)
             solar(:,:,q,:) = reshape(solar2,[is%n1,is%n2,nh])
@@ -806,14 +1092,13 @@ contains
 
         return
 
-    end subroutine calc_insol_diurnal_days_2D
+    end subroutine calc_insol_diurnal_days_2D_orbit
 
 ! =====================================================================================================
 ! Daylength
 
     subroutine calc_daylength_pt(is,daylength,day,lat,time_bp)
-        ! Hours the sun is above the horizon at one latitude. This is the plain
-        ! daily window (elevation floor zero), so daylength = 24 * tday.
+        ! As calc_daylength_pt_orbit, with the orbit from the tables at time_bp.
 
         implicit none
 
@@ -823,12 +1108,30 @@ contains
         real(dp),          intent(IN)  :: lat
         real(dp),          intent(IN)  :: time_bp
 
+        call calc_daylength_pt_orbit(is,daylength,day,lat,orbit_pars_at(is,time_bp))
+
+        return
+
+    end subroutine calc_daylength_pt
+
+    subroutine calc_daylength_pt_orbit(is,daylength,day,lat,orbit)
+        ! Hours the sun is above the horizon at one latitude. This is the plain
+        ! daily window (elevation floor zero), so daylength = 24 * tday.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: daylength   ! [hours]
+        integer,           intent(IN)  :: day
+        real(dp),          intent(IN)  :: lat
+        type(orbit_pars_class), intent(IN) :: orbit
+
         ! Local variables
         real(dp) :: decl, dist2, latrad
         real(dp) :: sinlat1(1), coslat1(1)
         real(wp) :: insol1(1), tday1(1)
 
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
 
         latrad     = lat*deg_to_rad
         sinlat1(1) = sin(latrad)
@@ -840,10 +1143,10 @@ contains
 
         return
 
-    end subroutine calc_daylength_pt
+    end subroutine calc_daylength_pt_orbit
 
     subroutine calc_daylength_1D(is,daylength,day,time_bp)
-        ! Daylength over the 1D grid.
+        ! As calc_daylength_1D_orbit, with the orbit from the tables at time_bp.
 
         implicit none
 
@@ -852,13 +1155,29 @@ contains
         integer,           intent(IN)  :: day
         real(dp),          intent(IN)  :: time_bp
 
+        call calc_daylength_1D_orbit(is,daylength,day,orbit_pars_at(is,time_bp))
+
+        return
+
+    end subroutine calc_daylength_1D
+
+    subroutine calc_daylength_1D_orbit(is,daylength,day,orbit)
+        ! Daylength over the 1D grid.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: daylength(:)   ! [hours]
+        integer,           intent(IN)  :: day
+        type(orbit_pars_class), intent(IN) :: orbit
+
         ! Local variables
         real(dp) :: decl, dist2
         real(wp) :: insol_l(is%n_lat)
 
         call check_grid(is,size(daylength),1,"calc_daylength")
 
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
         call calc_insol_kernel(insol_l,is%sinlat,is%coslat,decl,dist2,is%S0, &
                                tday=daylength)
 
@@ -866,10 +1185,10 @@ contains
 
         return
 
-    end subroutine calc_daylength_1D
+    end subroutine calc_daylength_1D_orbit
 
     subroutine calc_daylength_2D(is,daylength,day,time_bp)
-        ! Daylength over the 2D grid.
+        ! As calc_daylength_2D_orbit, with the orbit from the tables at time_bp.
 
         implicit none
 
@@ -878,13 +1197,29 @@ contains
         integer,           intent(IN)  :: day
         real(dp),          intent(IN)  :: time_bp
 
+        call calc_daylength_2D_orbit(is,daylength,day,orbit_pars_at(is,time_bp))
+
+        return
+
+    end subroutine calc_daylength_2D
+
+    subroutine calc_daylength_2D_orbit(is,daylength,day,orbit)
+        ! Daylength over the 2D grid.
+
+        implicit none
+
+        type(insol_class), intent(IN)  :: is
+        real(wp),          intent(OUT) :: daylength(:,:)   ! [hours]
+        integer,           intent(IN)  :: day
+        type(orbit_pars_class), intent(IN) :: orbit
+
         ! Local variables
         real(dp) :: decl, dist2
         real(wp) :: insol_l(is%n_lat), tday1D(is%n_lat)
 
         call check_grid(is,size(daylength),2,"calc_daylength")
 
-        call calc_solar_geometry_day(is,decl,dist2,day,time_bp)
+        call calc_solar_geometry_day(is,decl,dist2,day,orbit)
         call calc_insol_kernel(insol_l,is%sinlat,is%coslat,decl,dist2,is%S0, &
                                tday=tday1D)
 
@@ -892,7 +1227,7 @@ contains
 
         return
 
-    end subroutine calc_daylength_2D
+    end subroutine calc_daylength_2D_orbit
 
     subroutine check_diurnal(nh_solar,nh_cosz,nlat_solar,nlat_cosz,routine)
         ! Validate the sub-daily arrays of a diurnal call: at least one hour
@@ -1162,25 +1497,41 @@ contains
 
     end subroutine calc_insol_kernel
 
-    subroutine calc_solar_geometry_day(is,decl,dist2,day,time_bp)
-        ! Orbital elements for `time_bp` and the solar geometry for `day`.
+    subroutine calc_solar_geometry_day(is,decl,dist2,day,orbit)
+        ! Solar geometry for `day` of an orbit, in the calendar of the state.
 
         implicit none
 
-        type(insol_class), intent(IN)  :: is
-        real(dp),          intent(OUT) :: decl, dist2
-        integer,           intent(IN)  :: day
-        real(dp),          intent(IN)  :: time_bp
+        type(insol_class),      intent(IN)  :: is
+        real(dp),               intent(OUT) :: decl, dist2
+        integer,                intent(IN)  :: day
+        type(orbit_pars_class), intent(IN)  :: orbit
 
         ! Local variables
-        real(dp) :: PER, ECC, XOBCH, TPERI, ZAVEXPE
+        real(dp) :: TPERI, ZAVEXPE
 
-        call calc_orbital_par(is%orb,time_bp,PER,ECC,XOBCH,TPERI,ZAVEXPE)
-        call calc_solar_geometry(decl,dist2,day,is%orb%day_year,ECC,XOBCH,TPERI,ZAVEXPE)
+        call calc_perihelion(TPERI,ZAVEXPE,orbit%ecc,orbit%per,is%orb%day_year)
+        call calc_solar_geometry(decl,dist2,day,is%orb%day_year, &
+                                 orbit%ecc,orbit%obl,TPERI,ZAVEXPE)
 
         return
 
     end subroutine calc_solar_geometry_day
+
+    function orbit_pars_at_is(is,time_bp) result(orbit)
+        ! Orbital elements from the tables of `is` at `time_bp` [yr, relative to 1950].
+
+        implicit none
+
+        type(insol_class), intent(IN) :: is
+        real(dp),          intent(IN) :: time_bp
+        type(orbit_pars_class) :: orbit
+
+        orbit = orbit_pars_at(is%orb,time_bp)
+
+        return
+
+    end function orbit_pars_at_is
 
     subroutine check_grid(is,n_given,rank_given,routine)
         ! Fail loudly when a grid routine is called on a state that has no grid,

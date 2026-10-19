@@ -131,6 +131,28 @@ grid, inserting a day axis just before `n_hour` (`(n_lat,n_day,n_hour)`,
 `calc_daylength` returns the hours the sun is above the horizon, for a point, a
 1D grid or a 2D grid; it equals `24*tday` at `elev_min = 0`.
 
+### Fixed orbits
+
+Every routine that takes `time_bp` also takes the orbital elements in its
+place, as an `orbit_pars_class`. `orbit_pars_fixed` gives them directly — for a
+control climate, say — and `orbit_pars_at` reads them from the tables at a time:
+
+```fortran
+type(orbit_pars_class) :: orbit
+
+orbit = orbit_pars_fixed(ecc=0.0167_dp,obl=23.44_dp,per=102.7_dp)   ! obl, per [deg]
+call calc_insol_day(is,insol,day,orbit)
+
+orbit = orbit_pars_at(is,-21e3_dp)          ! the elements at 21 ka
+call calc_insol_day(is,insol,day,orbit)     ! == calc_insol_day(is,insol,day,-21e3_dp)
+```
+
+Both run through the same geometry: a `time_bp` call is `orbit_pars_at`
+followed by the elements call, bit-for-bit. `per` is the longitude of perihelion
+as the tables give it (102.92° in 1950). The elements carry no calendar; the
+time of perihelion is derived with the `day_year` of the state they are used
+with.
+
 ### Mean cosine convention
 
 `coszm` — from `calc_insol_day`, `calc_insol_diurnal` or the elevation-threshold

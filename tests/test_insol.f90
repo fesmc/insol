@@ -61,6 +61,7 @@ program test_insol
     call test_non_negative()
     call test_polar_night()
     call test_energy_balance()
+    call test_orbit_pars()
 
     write(*,*)
     write(*,"(a,i0,a,i0,a)") "  ", n_pass, " passed, ", n_fail, " failed"
@@ -819,6 +820,120 @@ contains
 
     end subroutine test_energy_balance
 
+    subroutine test_orbit_pars()
+        ! The routines take the orbital elements in place of time_bp, from the
+        ! tables (orbit_pars_at) or given (orbit_pars_fixed). Elements read from
+        ! the tables at a time must reproduce the time_bp call bit-for-bit, and
+        ! so must the same elements passed in as a fixed orbit: both run through
+        ! one geometry. A fixed present-day orbit must give the familiar
+        ! present-day values, and a circular, untilted orbit the trivial ones.
+
+        implicit none
+
+        integer,  parameter :: nt = 6, nlat = 13
+        real(dp), parameter :: times(nt) = [-125e3_dp, -40e3_dp, -21e3_dp, &
+                                            -6e3_dp, 0.0_dp, 2.5e4_dp]
+        real(dp) :: lats(nlat)
+        real(wp) :: a, b, c
+        real(wp) :: a1D(nlat,360), b1D(nlat,360), c1D(nlat,360)
+        real(wp) :: dl_a(nlat), dl_b(nlat), ave_a(nlat), ave_b(nlat)
+        real(dp) :: err_tab, err_fix, err, lat
+        integer  :: i, k, day, days(360)
+        type(orbit_pars_class) :: orb_t, orb_f
+        type(insol_class) :: isg, isg365
+        real(wp) :: insol_fix, insol_tab
+
+        do i = 1, nlat
+            lats(i) = -90.0_dp + 15.0_dp*(i-1)
+        end do
+        do day = 1, 360
+            days(day) = day
+        end do
+
+        call insol_init(isg,   lats,fldr=fldr,S0=S0_ref)
+        call insol_init(isg365,lats,fldr=fldr,S0=S0_ref,day_year=365)
+
+        ! --- table and fixed elements reproduce the time_bp call exactly ---
+        err_tab = 0.0_dp
+        err_fix = 0.0_dp
+        do k = 1, nt
+            orb_t = orbit_pars_at(is,times(k))
+            orb_f = orbit_pars_fixed(orb_t%ecc,orb_t%obl,orb_t%per)
+
+            do day = 1, 360, 7
+                do i = 1, nlat
+                    call calc_insol_day(is,a,day,lats(i),times(k))
+                    call calc_insol_day(is,b,day,lats(i),orb_t)
+                    call calc_insol_day(is,c,day,lats(i),orb_f)
+                    err_tab = max(err_tab, abs(real(b,dp)-real(a,dp)))
+                    err_fix = max(err_fix, abs(real(c,dp)-real(a,dp)))
+                end do
+            end do
+
+            ! Grid, multi-day, average and daylength paths, in both calendars.
+            call calc_insol_days(isg,a1D,days,times(k))
+            call calc_insol_days(isg,b1D,days,orb_t)
+            call calc_insol_days(isg,c1D,days,orb_f)
+            err_tab = max(err_tab, maxval(abs(real(b1D,dp)-real(a1D,dp))))
+            err_fix = max(err_fix, maxval(abs(real(c1D,dp)-real(a1D,dp))))
+
+            call calc_insol_days(isg365,a1D,days,times(k))
+            call calc_insol_days(isg365,c1D,days,orb_f)
+            err_fix = max(err_fix, maxval(abs(real(c1D,dp)-real(a1D,dp))))
+
+            call calc_insol_ave(isg,ave_a,[152,243],times(k))
+            call calc_insol_ave(isg,ave_b,[152,243],orb_f)
+            err_fix = max(err_fix, maxval(abs(real(ave_b,dp)-real(ave_a,dp))))
+
+            call calc_daylength(isg,dl_a,172,times(k))
+            call calc_daylength(isg,dl_b,172,orb_f)
+            err_fix = max(err_fix, maxval(abs(real(dl_b,dp)-real(dl_a,dp))))
+        end do
+
+        call check("orbit_pars_at reproduces time_bp", err_tab, 0.0_dp, &
+                   "max |insol(orbit) - insol(time_bp)| [W/m2]")
+        call check("orbit_pars_fixed reproduces time_bp", err_fix, 0.0_dp, &
+                   "max |insol(fixed) - insol(time_bp)| [W/m2]")
+
+        ! --- fixed present-day orbit: 65N at the June solstice (day 172 of the
+        !     360-day year), close to the table orbit of 1950 ---
+        orb_f = orbit_pars_fixed(0.0167_dp,23.44_dp,102.7_dp)
+        call calc_insol_day(is,insol_fix,172,65.0_dp,orb_f)
+        call calc_insol_day(is,insol_tab,172,65.0_dp,0.0_dp)
+
+        write(*,"(a,f10.4,a,f10.4,a)") "     65N day 172: fixed orbit = ", insol_fix, &
+                                       ",  table at 1950 = ", insol_tab, " W/m2"
+
+        call check_range("fixed present-day orbit, 65N June", real(insol_fix,dp), &
+                         470.0_dp, 490.0_dp)
+        call check("fixed present-day orbit vs table at 1950", &
+                   abs(real(insol_fix,dp)-real(insol_tab,dp)), 0.5_dp, &
+                   "|insol(fixed) - insol(time_bp=0)| [W/m2]")
+
+        ! --- circular, untilted orbit: the sun stands over the equator every
+        !     day at the same distance, so the equator receives S0/pi and the
+        !     insolation is symmetric about it ---
+        orb_f = orbit_pars_fixed(0.0_dp,0.0_dp,0.0_dp)
+        err = 0.0_dp
+        do day = 1, 360, 5
+            call calc_insol_day(is,a,day,0.0_dp,orb_f)
+            err = max(err, abs(real(a,dp)-S0_ref/pi))
+            do i = 1, 8
+                lat = 10.0_dp*i
+                call calc_insol_day(is,b,day, lat,orb_f)
+                call calc_insol_day(is,c,day,-lat,orb_f)
+                err = max(err, abs(real(b,dp)-real(c,dp)))
+            end do
+        end do
+
+        call check("circular untilted orbit: equator S0/pi, symmetric", err, tol_ref, &
+                   "max error [W/m2]")
+
+        call insol_end(isg)
+        call insol_end(isg365)
+
+    end subroutine test_orbit_pars
+
     ! ------------------------------------------------------------------
     ! Minimal check framework
     ! ------------------------------------------------------------------
@@ -856,6 +971,23 @@ contains
         end if
 
     end subroutine check_exact
+
+    subroutine check_range(name, value, lo, hi)
+        ! Pass if lo <= value <= hi.
+
+        implicit none
+
+        character(len=*), intent(IN) :: name
+        real(dp),         intent(IN) :: value, lo, hi
+
+        if (.not. (value >= lo .and. value <= hi)) then
+            call fail(name, trim(rtoa(value))//" outside ["// &
+                            trim(rtoa(lo))//","//trim(rtoa(hi))//"]")
+        else
+            call pass(name)
+        end if
+
+    end subroutine check_range
 
     subroutine pass(name)
 

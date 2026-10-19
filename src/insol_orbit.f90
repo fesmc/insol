@@ -49,11 +49,36 @@ module insol_orbit
         integer :: day_year                  ! Days in the year (360, 365, 366)
     end type
 
+    type orbit_pars_class
+        ! Orbital elements at one moment: either read from the tables at a time
+        ! (orbit_pars_at) or given (orbit_pars_fixed). Both go through the same
+        ! solar geometry, so a fixed orbit differs from a table orbit only in
+        ! where its elements come from.
+        !
+        ! Only the elements are held. The time and longitude of perihelion that
+        ! the geometry needs follow from them and the calendar (calc_perihelion),
+        ! and the calendar belongs to the state the elements are used with, so
+        ! one set of elements is valid for any calendar.
+        real(dp) :: ecc                      ! Eccentricity
+        real(dp) :: obl                      ! Obliquity [degrees]
+        real(dp) :: per                      ! Longitude of perihelion [degrees], as in the tables
+    end type
+
+    ! Orbital elements from the tables at a time. Extended in `insolation` to
+    ! take an insol_class.
+    interface orbit_pars_at
+        module procedure orbit_pars_at_orb
+    end interface
+
     private
     public :: orbit_class
+    public :: orbit_pars_class
     public :: orbit_init
     public :: orbit_end
+    public :: orbit_pars_at
+    public :: orbit_pars_fixed
     public :: calc_orbital_par
+    public :: calc_perihelion
     public :: calc_solar_geometry
     public :: calc_solar_geometry_at
     public :: calc_solar_geometry_M
@@ -413,36 +438,57 @@ contains
     end subroutine calc_solar_position_date
 
     subroutine calc_orbital_par(orb,time,per,ecc,obl,tper,zan)
-        !
-        ! Calculates Earth's orbital parameters for the current time before 1950 (time)
-        !
-        ! Adapted from Fortran77 subroutine BERGOR written by  
-        ! S. J. Lorenz, University of Bremen, 08-03-94.
-        !
-        ! Orbital parameters are loaded from a precalculated table of orbital values
-        !
+        ! Earth's orbital elements at a time relative to 1950 (`time` [yr]), and
+        ! the time and longitude of perihelion derived from them.
+
         implicit none
 
         type(orbit_class), intent(IN)  :: orb
         real(dp),          intent(IN)  :: time
         real(dp),          intent(OUT) :: per, ecc, obl, tper, zan
 
-        integer :: N1, N2, NMID
-        real (dp) :: time_ka, ef
-        real (dp) :: perm1, perm2
-        real (dp) :: ang, tgnu, sqecc, tian
-        real (dp) :: days, e, epc
-        real (dp) :: day_year
+        ! Local variables
+        type(orbit_pars_class) :: orbit
+
+        orbit = orbit_pars_at_orb(orb,time)
+
+        per = orbit%per
+        ecc = orbit%ecc
+        obl = orbit%obl
+
+        call calc_perihelion(tper,zan,orbit%ecc,orbit%per,orb%day_year)
+
+        return
+
+    end subroutine calc_orbital_par
+
+    function orbit_pars_at_orb(orb,time_bp) result(orbit)
+        ! Orbital elements interpolated from the tables at `time_bp` [yr,
+        ! relative to 1950].
+        !
+        ! Adapted from Fortran77 subroutine BERGOR written by
+        ! S. J. Lorenz, University of Bremen, 08-03-94.
+
+        implicit none
+
+        type(orbit_class), intent(IN) :: orb
+        real(dp),          intent(IN) :: time_bp
+        type(orbit_pars_class) :: orbit
+
+        ! Local variables
+        integer  :: N1, N2, NMID
+        real(dp) :: time_ka, ef
+        real(dp) :: perm1, perm2
 
         ! Get current time in ka
-        time_ka = time*1d-3
+        time_ka = time_bp*1d-3
 
         ! The tables span -5 Ma to +1 Ma; extrapolating beyond them is
         ! meaningless, and reading past the end used to run off the array.
         if (time_ka .lt. orb%time(1) .or. time_ka .gt. orb%time(orb%n_orbit)) then
-            write(*,*) "calc_orbital_par:: Error: time_bp outside the range of the"
+            write(*,*) "orbit_pars_at:: Error: time_bp outside the range of the"
             write(*,*) "orbital parameter tables."
-            write(*,*) "time_bp [yr]:   ", time
+            write(*,*) "time_bp [yr]:   ", time_bp
             write(*,*) "table range [yr]:", orb%time(1)*1d3, orb%time(orb%n_orbit)*1d3
             error stop 1
         end if
@@ -465,46 +511,98 @@ contains
         ef = (time_ka-orb%time(N1)) / (orb%time(N2)-orb%time(N1))
 
         ! Get current eccentricity, obliquity and perihelion
-        ecc = (1.0_dp-ef)*orb%eccm(N1) + ef*orb%eccm(N2)
-        obl = (1.0_dp-ef)*orb%xobm(N1) + ef*orb%xobm(N2)
+        orbit%ecc = (1.0_dp-ef)*orb%eccm(N1) + ef*orb%eccm(N2)
+        orbit%obl = (1.0_dp-ef)*orb%xobm(N1) + ef*orb%xobm(N2)
 
         perm1 = orb%perm(N1)
         perm2 = orb%perm(N2)
         if (perm2 .lt. perm1) perm2 = perm2 + 360.0_dp
-        
-        per = (1.0_dp-ef)*perm1 + ef*perm2
-        if (per .gt. 360.0_dp) per = per - 360.0_dp
 
-        !  calculate time of perihelion in year:
+        orbit%per = (1.0_dp-ef)*perm1 + ef*perm2
+        if (orbit%per .gt. 360.0_dp) orbit%per = orbit%per - 360.0_dp
+
+        return
+
+    end function orbit_pars_at_orb
+
+    function orbit_pars_fixed(ecc,obl,per) result(orbit)
+        ! Given orbital elements, for a fixed orbit (eg. a control climate).
+        ! `per` is the longitude of perihelion in the convention of the tables
+        ! (Berger 1978; see calc_perihelion): 102.92 degrees in 1950, with
+        ! ecc = 0.01670 and obl = 23.439 degrees.
+
+        implicit none
+
+        real(dp), intent(IN) :: ecc          ! Eccentricity
+        real(dp), intent(IN) :: obl          ! Obliquity [degrees]
+        real(dp), intent(IN) :: per          ! Longitude of perihelion [degrees]
+        type(orbit_pars_class) :: orbit
+
+        if (.not. (ecc .ge. 0.0_dp .and. ecc .lt. 1.0_dp)) then
+            write(*,*) "orbit_pars_fixed:: Error: eccentricity must be in [0,1)."
+            write(*,*) "ecc: ", ecc
+            error stop 1
+        end if
+
+        if (.not. (obl .ge. 0.0_dp .and. obl .le. 90.0_dp)) then
+            write(*,*) "orbit_pars_fixed:: Error: obliquity must be in [0,90] degrees."
+            write(*,*) "obl: ", obl
+            error stop 1
+        end if
+
+        orbit%ecc = ecc
+        orbit%obl = obl
+        orbit%per = modulo(per,360.0_dp)
+
+        return
+
+    end function orbit_pars_fixed
+
+    subroutine calc_perihelion(tper,zan,ecc,per,day_year)
+        ! Time of perihelion in the year and its longitude from the vernal
+        ! equinox, from the eccentricity and the longitude of perihelion. Shared
+        ! by table and fixed orbits, so both see the same geometry.
+        !
         !  MONIN, A.S.: An Introduction to the Theory of Climate (Reidel Publ.)
         !   - PER: perihelion from aut. equinox in degrees (BERGER)
         !   - ECC: eccentricity of Earth's orbit (BERGER)
+
+        implicit none
+
+        real(dp), intent(OUT) :: tper        ! Time of perihelion [days from year start]
+        real(dp), intent(OUT) :: zan         ! Longitude of perihelion from vernal equinox [radians]
+        real(dp), intent(IN)  :: ecc         ! Eccentricity
+        real(dp), intent(IN)  :: per         ! Longitude of perihelion [degrees], as in the tables
+        integer,  intent(IN)  :: day_year    ! Days in the year
+
+        ! Local variables
+        real(dp) :: ang, tgnu, sqecc, tian
+        real(dp) :: days, e
+        real(dp) :: dyear
 
         ang = per - 180.0_dp
         if (ang .lt. 0.0_dp) ang = ang+360.0_dp
         zan   = ang / 180.0_dp*pi                !   =zavexpe
         tgnu  = tan(zan/2.0_dp)
         sqecc = dsqrt((1.0_dp-ecc)/(1.0_dp+ecc))
-        e     = 2.0_dp*atan(sqecc*tgnu)          !   Eccentri!   Anomaly
+        e     = 2.0_dp*atan(sqecc*tgnu)          !   Eccentric anomaly
 
         !   time angle in radians of perihelion from vernal equinox
 
-        tian = e - ecc*sin(e)
-        day_year = real(orb%day_year,dp)
+        tian  = e - ecc*sin(e)
+        dyear = real(day_year,dp)
 
-        days = tian/(2.0_dp*pi)*day_year           !   days from ver.eq. to perh.
-        if (days .lt. 0.0_dp) days = days+day_year
+        days = tian/(2.0_dp*pi)*dyear            !   days from ver.eq. to perh.
+        if (days .lt. 0.0_dp) days = days+dyear
 
         !   time in days from begin of year: vernal equinox fixed at 3/21, 12 GMT
 
-        tper = days+calc_day_vernal_equinox(orb%day_year)
-        if (tper .gt. day_year) tper = tper-day_year
-
-        epc = ecc*100.0_dp
+        tper = days+calc_day_vernal_equinox(day_year)
+        if (tper .gt. dyear) tper = tper-dyear
 
         return
 
-    end subroutine calc_orbital_par 
+    end subroutine calc_perihelion
 
     subroutine load_orbital_table(orb,fldr)
         ! Load the orbital parameter tables (Laskar et al. 2004) covering
