@@ -2,7 +2,7 @@
 
 Notable changes to `insol`, newest first. Versions are annotated git tags.
 
-## Unreleased
+## v1.2.0 (2026-10-23)
 
 Additive: fixed orbits. Backwards compatible — `time_bp` calls are unchanged
 and return bit-for-bit the same values.
