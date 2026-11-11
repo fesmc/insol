@@ -786,7 +786,7 @@ contains
 
         integer,  parameter :: nmu  = 200
         integer,  parameter :: nday = 360
-        real(dp), parameter :: ecc_1950 = 0.0167023622549_dp   ! from LA2004 at t=0
+        real(dp), parameter :: ecc_1950 = 0.0167023622549_dp   ! from LA2004 at t=0 (J2000; 1950 differs by 1e-8)
 
         real(dp) :: mu, lats(nmu)
         real(wp) :: insol(nmu)

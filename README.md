@@ -149,7 +149,7 @@ call calc_insol_day(is,insol,day,orbit)     ! == calc_insol_day(is,insol,day,-21
 
 Both run through the same geometry: a `time_bp` call is `orbit_pars_at`
 followed by the elements call, bit-for-bit. `per` is the longitude of perihelion
-as the tables give it (102.92° in 1950). The elements carry no calendar; the
+as the tables give it (102.06° in 1950, 102.92° at J2000). The elements carry no calendar; the
 time of perihelion is derived with the `day_year` of the state they are used
 with.
 
@@ -182,7 +182,8 @@ call insol_init(is,lats,coszm_kind="daytime")
 
 ### Conventions
 
-- `time_bp` is years relative to 1950; negative is into the past.
+- `time_bp` is years relative to 1950; negative is into the past. The tables of
+  Laskar et al. (2004) count from J2000, so `time_bp = 0` reads them at -50 yr.
 - Latitudes are degrees north, in `dp`. Insolation is returned in `wp`, which is
   `dp` unless the library is built with `-DINSOL_SP`.
 - `day_year` selects how the orbit is labelled, not a different orbit: the

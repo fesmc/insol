@@ -4,6 +4,15 @@ Notable changes to `insol`, newest first. Versions are annotated git tags.
 
 ## Unreleased
 
+### Fixed
+
+- The time origin of the tables: Laskar et al. (2004) count from J2000, which
+  was read as 1950, so every orbit was that of 50 years later (0.86° of
+  perihelion; the eccentricity and obliquity differ by 1e-8 and 1e-5°).
+  `time_bp` (relative to 1950) now reads the tables at `time_bp - 50` yr.
+  Insolation changes slightly everywhere (the reference values are regenerated
+  with the same correction in `scripts/make_reference.jl`).
+
 ### Added
 
 - `insol_init(..., tables=.false.)`: a state without the orbital tables, for a

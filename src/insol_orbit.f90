@@ -38,10 +38,13 @@ module insol_orbit
 
     implicit none
 
+    ! J2000, the origin of the tables of Laskar et al. (2004), in years after 1950 (the origin of time_bp)
+    real(dp), parameter :: J2000_BP = 50.0_dp
+
     type orbit_class
         ! Orbital element table, loaded once by orbit_init and read-only after.
         integer :: n_orbit = 0
-        real(dp), allocatable :: time(:)     ! [ka] relative to 1950
+        real(dp), allocatable :: time(:)     ! [ka] relative to J2000 (the tables' own origin)
         real(dp), allocatable :: eccm(:)     ! Eccentricity
         real(dp), allocatable :: xobm(:)     ! Obliquity [degrees]
         real(dp), allocatable :: perm(:)     ! Longitude of perihelion [degrees]
@@ -499,8 +502,9 @@ contains
             error stop 1
         end if
 
-        ! Get current time in ka
-        time_ka = time_bp*1d-3
+        ! Time of the tables [ka]: Laskar et al. (2004) count from J2000, 50 yr after
+        ! the 1950 of time_bp
+        time_ka = (time_bp - J2000_BP)*1d-3
 
         ! The tables span -5 Ma to +1 Ma; extrapolating beyond them is
         ! meaningless, and reading past the end used to run off the array.
@@ -508,7 +512,7 @@ contains
             write(*,*) "orbit_pars_at:: Error: time_bp outside the range of the"
             write(*,*) "orbital parameter tables."
             write(*,*) "time_bp [yr]:   ", time_bp
-            write(*,*) "table range [yr]:", orb%time(1)*1d3, orb%time(orb%n_orbit)*1d3
+            write(*,*) "table range [yr]:", orb%time(1)*1d3 + J2000_BP, orb%time(orb%n_orbit)*1d3 + J2000_BP
             error stop 1
         end if
 
@@ -547,7 +551,7 @@ contains
     function orbit_pars_fixed(ecc,obl,per) result(orbit)
         ! Given orbital elements, for a fixed orbit (eg. a control climate).
         ! `per` is the longitude of perihelion in the convention of the tables
-        ! (Berger 1978; see calc_perihelion): 102.92 degrees in 1950, with
+        ! (Berger 1978; see calc_perihelion): 102.92 degrees at J2000 (102.06 in 1950), with
         ! ecc = 0.01670 and obl = 23.439 degrees.
 
         implicit none
