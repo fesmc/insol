@@ -149,9 +149,45 @@ call calc_insol_day(is,insol,day,orbit)     ! == calc_insol_day(is,insol,day,-21
 
 Both run through the same geometry: a `time_bp` call is `orbit_pars_at`
 followed by the elements call, bit-for-bit. `per` is the longitude of perihelion
-as the tables give it (102.92° in 1950). The elements carry no calendar; the
+as the tables give it (102.06° in 1950, 102.92° at J2000). The elements carry no calendar; the
 time of perihelion is derived with the `day_year` of the state they are used
 with.
+
+### A state without tables
+
+A model that is given the orbit by its host (a coupler that resolves the orbit
+once, for every component) needs the latitude geometry and the calendar but not
+the tables:
+
+```fortran
+call insol_init(is,lats,day_year=365,tables=.false.)   ! no input files read
+call calc_insol_days(is,insol,days,orbit)              ! orbit from the host
+```
+
+Such a state takes the orbit only as elements; a `time_bp` call stops with a
+message (`orbit_pars_at` needs the tables).
+
+### Latitude profiles onto grids
+
+TOA insolation depends on latitude only, so a model can compute it once on a
+latitude table (a 1D state, e.g. 1° or 0.1°) and map that profile onto any grid,
+lon-lat or projected:
+
+```fortran
+call insol_lat_to_grid(lat_table,S_table,lat2D,S)   ! S_table(n_lat[,m]) -> S(nx,ny[,m])
+
+type(insol_stencil_class) :: st                       ! the same, the weights kept
+call insol_stencil_init(st,lat_table,lat2D)           ! once
+call insol_stencil_apply(st,S_table,S)                ! every time the profile changes
+S_k = insol_stencil_point(st,k,S_table)               ! one target point (flat index)
+```
+
+The interpolation is linear in latitude; on a regular table it is
+`x = (lat - lat_table(1))/dlat`, `j0 = int(x) + 1`, `w1 = x - (j0 - 1)`, and
+targets beyond the table take its ends. A trailing axis (days, months) is kept.
+On a 1° table the profile differs from the exact insolation on the grid by a few
+W/m2 at most, near the edges of the polar night; for an exact field, initialise
+the state with the grid's latitudes instead (`insol_init(is,lat2D)`).
 
 ### Mean cosine convention
 
@@ -168,7 +204,8 @@ call insol_init(is,lats,coszm_kind="daytime")
 
 ### Conventions
 
-- `time_bp` is years relative to 1950; negative is into the past.
+- `time_bp` is years relative to 1950; negative is into the past. The tables of
+  Laskar et al. (2004) count from J2000, so `time_bp = 0` reads them at -50 yr.
 - Latitudes are degrees north, in `dp`. Insolation is returned in `wp`, which is
   `dp` unless the library is built with `-DINSOL_SP`.
 - `day_year` selects how the orbit is labelled, not a different orbit: the

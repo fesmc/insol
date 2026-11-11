@@ -29,7 +29,7 @@ const TVEREX = Dict(360 => 80.5,    # 30 + 30 + 20.5
 
 "Orbital element table from Laskar et al. (2004): time in ka, angles in degrees."
 struct OrbitTable
-    time::Vector{Float64}   # ka relative to 1950
+    time::Vector{Float64}   # ka relative to J2000 (the tables' own origin)
     ecc::Vector{Float64}    # eccentricity
     obl::Vector{Float64}    # obliquity [deg]
     per::Vector{Float64}    # longitude of perihelion [deg]
@@ -69,12 +69,13 @@ end
 """
     orbital_par(tab, time_bp)
 
-Interpolate the orbital elements to `time_bp` (years before 1950) and derive the
+Interpolate the orbital elements to `time_bp` (years relative to 1950; the tables count
+from J2000, 50 years later) and derive the
 time of perihelion. Returns `(ecc, obl, per, tper, zavexpe)` with angles in
 degrees except `zavexpe` (radians) and `tper` (days from start of year).
 """
 function orbital_par(tab::OrbitTable, time_bp, day_year)
-    t_ka = time_bp * 1e-3
+    t_ka = (time_bp - 50) * 1e-3
     (t_ka < first(tab.time) || t_ka > last(tab.time)) &&
         error("time_bp = $time_bp ka outside orbital table range")
 

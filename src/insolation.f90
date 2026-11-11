@@ -137,6 +137,42 @@ module insolation
         module procedure orbit_pars_at_is
     end interface
 
+    ! Linear interpolation in latitude from a table of latitudes (a profile, e.g. on 1 degree) onto any
+    ! target latitudes (points, a 1D or a 2D grid: lon-lat or projected), precomputed once. TOA
+    ! insolation depends on latitude only, so a profile computed once maps onto every grid of a model.
+    ! On a regular table the stencil is x = (lat - lat_table(1))/dlat, j0 = int(x) + 1 (clamped),
+    ! w1 = x - (j0 - 1); otherwise j0 by bisection. Target latitudes beyond the table take its ends.
+    type insol_stencil_class
+        integer  :: n = 0                    ! target points
+        integer  :: n1 = 0, n2 = 0           ! target shape (n2 = 0 for 1D targets)
+        integer  :: n_table = 0              ! table latitudes
+        integer,  allocatable :: j0(:)       ! (n) table row at or below the target latitude
+        real(dp), allocatable :: w1(:)       ! (n) weight of row j0+1
+    end type
+
+    interface insol_stencil_init
+        module procedure insol_stencil_init_1D
+        module procedure insol_stencil_init_2D
+    end interface
+
+    ! A table field (n_table) or (n_table, m) onto the targets: (n) or (n1,n2), with the trailing axis
+    ! (days, months) kept. Single or double precision.
+    interface insol_stencil_apply
+        module procedure stencil_apply_1D_sp, stencil_apply_2D_sp, stencil_apply_1Dm_sp, stencil_apply_2Dm_sp
+        module procedure stencil_apply_1D_dp, stencil_apply_2D_dp, stencil_apply_1Dm_dp, stencil_apply_2Dm_dp
+    end interface
+
+    ! The value at target point k (flat index), for a host that loops over its points.
+    interface insol_stencil_point
+        module procedure stencil_point_sp, stencil_point_dp
+    end interface
+
+    ! One-shot: insol_stencil_init followed by insol_stencil_apply.
+    interface insol_lat_to_grid
+        module procedure lat_to_grid_1D_sp, lat_to_grid_2D_sp, lat_to_grid_1Dm_sp, lat_to_grid_2Dm_sp
+        module procedure lat_to_grid_1D_dp, lat_to_grid_2D_dp, lat_to_grid_1Dm_dp, lat_to_grid_2Dm_dp
+    end interface
+
     private
     ! Re-exported so a caller needs only `use insolation` to declare variables
     ! of the kind the interface exchanges.
@@ -153,15 +189,18 @@ module insolation
     public :: calc_insol_diurnal
     public :: calc_insol_diurnal_days
     public :: calc_daylength
+    public :: insol_stencil_class, insol_stencil_init, insol_stencil_apply, insol_stencil_point
+    public :: insol_lat_to_grid
 
 contains
 
 ! =====================================================================================================
 ! Initialization
 
-    subroutine insol_init_nogrid(is,fldr,S0,day_year,coszm_kind)
+    subroutine insol_init_nogrid(is,fldr,S0,day_year,coszm_kind,tables)
         ! Load the orbital tables without a latitude grid. The resulting state
-        ! supports point queries only.
+        ! supports point queries only. tables = .false.: no tables either; the
+        ! state then takes the orbit only as elements (orbit_pars_class).
 
         implicit none
 
@@ -170,8 +209,9 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
-        call insol_config(is,fldr,S0,day_year,coszm_kind)
+        call insol_config(is,fldr,S0,day_year,coszm_kind,tables)
 
         is%grid  = .FALSE.
         is%n_lat = 0
@@ -182,8 +222,10 @@ contains
 
     end subroutine insol_init_nogrid
 
-    subroutine insol_init_1D(is,lats,fldr,S0,day_year,coszm_kind)
-        ! Load the orbital tables and precompute the geometry of a 1D latitude grid.
+    subroutine insol_init_1D(is,lats,fldr,S0,day_year,coszm_kind,tables)
+        ! Load the orbital tables (unless tables = .false.: the state then takes
+        ! the orbit only as elements) and precompute the geometry of a 1D
+        ! latitude grid.
 
         implicit none
 
@@ -193,16 +235,19 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
-        call insol_config(is,fldr,S0,day_year,coszm_kind)
+        call insol_config(is,fldr,S0,day_year,coszm_kind,tables)
         call insol_set_grid(is,reshape(lats,[size(lats)]),size(lats),0)
 
         return
 
     end subroutine insol_init_1D
 
-    subroutine insol_init_2D(is,lats,fldr,S0,day_year,coszm_kind)
-        ! Load the orbital tables and precompute the geometry of a 2D latitude grid.
+    subroutine insol_init_2D(is,lats,fldr,S0,day_year,coszm_kind,tables)
+        ! Load the orbital tables (unless tables = .false.: the state then takes
+        ! the orbit only as elements) and precompute the geometry of a 2D
+        ! latitude grid.
 
         implicit none
 
@@ -212,8 +257,9 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
-        call insol_config(is,fldr,S0,day_year,coszm_kind)
+        call insol_config(is,fldr,S0,day_year,coszm_kind,tables)
         call insol_set_grid(is,reshape(lats,[size(lats)]),size(lats,1),size(lats,2))
 
         return
@@ -1274,10 +1320,10 @@ contains
 ! =====================================================================================================
 ! Internal helpers
 
-    subroutine insol_config(is,fldr,S0,day_year,coszm_kind)
-        ! Apply configuration defaults and load the orbital tables. The mean
-        ! cosine convention is resolved from its string once, here, so the hot
-        ! path stores only the integer code.
+    subroutine insol_config(is,fldr,S0,day_year,coszm_kind,tables)
+        ! Apply configuration defaults and load the orbital tables (unless
+        ! tables = .false.). The mean cosine convention is resolved from its
+        ! string once, here, so the hot path stores only the integer code.
 
         implicit none
 
@@ -1286,6 +1332,7 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
         is%S0 = S0_default
         if (present(S0)) is%S0 = S0
@@ -1293,7 +1340,7 @@ contains
         is%coszm_kind = COSZM_KIND_FLUX
         if (present(coszm_kind)) is%coszm_kind = resolve_coszm_kind(coszm_kind)
 
-        call orbit_init(is%orb,fldr,day_year)
+        call orbit_init(is%orb,fldr,day_year,tables)
 
         return
 
@@ -1613,6 +1660,419 @@ contains
 
 
 ! =====================================================================================================
+
+
+! =====================================================================================================
+! Latitude profiles onto grids
+
+    subroutine insol_stencil_init_1D(st,lat_table,lats)
+        ! The stencil from the table latitudes (strictly increasing) onto target latitudes `lats`.
+
+        implicit none
+
+        type(insol_stencil_class), intent(OUT) :: st
+        real(dp),                  intent(IN)  :: lat_table(:)
+        real(dp),                  intent(IN)  :: lats(:)
+
+        call stencil_build(st,lat_table,lats)
+        st%n1 = size(lats)
+        st%n2 = 0
+
+    end subroutine insol_stencil_init_1D
+
+    subroutine insol_stencil_init_2D(st,lat_table,lats)
+        ! As insol_stencil_init_1D, onto a 2D grid of latitudes (lon-lat or projected).
+
+        implicit none
+
+        type(insol_stencil_class), intent(OUT) :: st
+        real(dp),                  intent(IN)  :: lat_table(:)
+        real(dp),                  intent(IN)  :: lats(:,:)
+
+        call stencil_build(st,lat_table,reshape(lats,[size(lats)]))
+        st%n1 = size(lats,1)
+        st%n2 = size(lats,2)
+
+    end subroutine insol_stencil_init_2D
+
+    subroutine stencil_build(st,t,lats)
+
+        implicit none
+
+        type(insol_stencil_class), intent(INOUT) :: st
+        real(dp),                  intent(IN)    :: t(:)
+        real(dp),                  intent(IN)    :: lats(:)
+
+        ! Local variables
+        integer  :: k, nt, lo, hi, mid
+        real(dp) :: d, x
+        logical  :: regular
+
+        nt = size(t)
+        if (nt .lt. 2) then
+            write(*,*) "insol_stencil_init:: Error: the table needs at least two latitudes."
+            error stop 1
+        end if
+        if (any(t(2:nt) .le. t(1:nt-1))) then
+            write(*,*) "insol_stencil_init:: Error: the table latitudes must be strictly increasing."
+            error stop 1
+        end if
+
+        st%n       = size(lats)
+        st%n_table = nt
+        allocate(st%j0(st%n),st%w1(st%n))
+
+        d = (t(nt)-t(1))/real(nt-1,dp)
+        regular = all(abs((t(2:nt)-t(1:nt-1)) - d) .le. 1.0e-9_dp*d)
+
+        do k = 1, st%n
+            if (regular) then
+                x = (lats(k)-t(1))/d
+                st%j0(k) = min(max(int(x)+1,1),nt-1)
+                st%w1(k) = x - real(st%j0(k)-1,dp)
+            else
+                lo = 1
+                hi = nt
+                do while (hi-lo .gt. 1)
+                    mid = (lo+hi)/2
+                    if (t(mid) .le. lats(k)) then
+                        lo = mid
+                    else
+                        hi = mid
+                    end if
+                end do
+                st%j0(k) = lo
+                st%w1(k) = (lats(k)-t(lo))/(t(lo+1)-t(lo))
+            end if
+            st%w1(k) = min(max(st%w1(k),0.0_dp),1.0_dp)
+        end do
+
+    end subroutine stencil_build
+
+    subroutine stencil_check(st,n_table,n_target,proc)
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN) :: st
+        integer,                   intent(IN) :: n_table, n_target
+        character(len=*),          intent(IN) :: proc
+
+        if (n_table .ne. st%n_table .or. n_target .ne. st%n) then
+            write(*,*) proc//":: Error: the field does not fit the stencil."
+            write(*,*) "table: ", n_table, " (stencil ", st%n_table, "), targets: ", n_target, " (stencil ", st%n, ")"
+            error stop 1
+        end if
+
+    end subroutine stencil_check
+
+
+    function stencil_point_sp(st,k,S_table) result(S)
+        ! The table field interpolated to target point k (flat index of the targets).
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN) :: st
+        integer,                   intent(IN) :: k
+        real(sp),                  intent(IN) :: S_table(:)
+        real(sp) :: S
+
+        S = (1.0_sp - real(st%w1(k),sp))*S_table(st%j0(k)) + real(st%w1(k),sp)*S_table(st%j0(k)+1)
+
+    end function stencil_point_sp
+
+    subroutine stencil_apply_1D_sp(st,S_table,S)
+        ! A table field (n_table) onto 1D targets (n).
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(sp),                  intent(IN)  :: S_table(:)
+        real(sp),                  intent(OUT) :: S(:)
+
+        integer :: i
+
+        call stencil_check(st,size(S_table),size(S),"insol_stencil_apply")
+        do i = 1, st%n
+            S(i) = stencil_point_sp(st,i,S_table)
+        end do
+
+    end subroutine stencil_apply_1D_sp
+
+    subroutine stencil_apply_2D_sp(st,S_table,S)
+        ! A table field (n_table) onto 2D targets (n1,n2).
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(sp),                  intent(IN)  :: S_table(:)
+        real(sp),                  intent(OUT) :: S(:,:)
+
+        integer :: i, j
+
+        call stencil_check(st,size(S_table),size(S),"insol_stencil_apply")
+        do j = 1, size(S,2)
+            do i = 1, size(S,1)
+                S(i,j) = stencil_point_sp(st,i+(j-1)*size(S,1),S_table)
+            end do
+        end do
+
+    end subroutine stencil_apply_2D_sp
+
+    subroutine stencil_apply_1Dm_sp(st,S_table,S)
+        ! A table field (n_table,m) onto 1D targets (n,m), m days or months.
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(sp),                  intent(IN)  :: S_table(:,:)
+        real(sp),                  intent(OUT) :: S(:,:)
+
+        integer :: m
+
+        do m = 1, size(S_table,2)
+            call stencil_apply_1D_sp(st,S_table(:,m),S(:,m))
+        end do
+
+    end subroutine stencil_apply_1Dm_sp
+
+    subroutine stencil_apply_2Dm_sp(st,S_table,S)
+        ! A table field (n_table,m) onto 2D targets (n1,n2,m), m days or months.
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(sp),                  intent(IN)  :: S_table(:,:)
+        real(sp),                  intent(OUT) :: S(:,:,:)
+
+        integer :: m
+
+        do m = 1, size(S_table,2)
+            call stencil_apply_2D_sp(st,S_table(:,m),S(:,:,m))
+        end do
+
+    end subroutine stencil_apply_2Dm_sp
+
+    subroutine lat_to_grid_1D_sp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(sp), intent(IN)  :: S_table(:)
+        real(dp), intent(IN)  :: lats(:)
+        real(sp), intent(OUT) :: S(:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_1D_sp
+
+    subroutine lat_to_grid_2D_sp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(sp), intent(IN)  :: S_table(:)
+        real(dp), intent(IN)  :: lats(:,:)
+        real(sp), intent(OUT) :: S(:,:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_2D_sp
+
+    subroutine lat_to_grid_1Dm_sp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(sp), intent(IN)  :: S_table(:,:)
+        real(dp), intent(IN)  :: lats(:)
+        real(sp), intent(OUT) :: S(:,:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_1Dm_sp
+
+    subroutine lat_to_grid_2Dm_sp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(sp), intent(IN)  :: S_table(:,:)
+        real(dp), intent(IN)  :: lats(:,:)
+        real(sp), intent(OUT) :: S(:,:,:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_2Dm_sp
+
+    function stencil_point_dp(st,k,S_table) result(S)
+        ! The table field interpolated to target point k (flat index of the targets).
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN) :: st
+        integer,                   intent(IN) :: k
+        real(dp),                  intent(IN) :: S_table(:)
+        real(dp) :: S
+
+        S = (1.0_dp - real(st%w1(k),dp))*S_table(st%j0(k)) + real(st%w1(k),dp)*S_table(st%j0(k)+1)
+
+    end function stencil_point_dp
+
+    subroutine stencil_apply_1D_dp(st,S_table,S)
+        ! A table field (n_table) onto 1D targets (n).
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(dp),                  intent(IN)  :: S_table(:)
+        real(dp),                  intent(OUT) :: S(:)
+
+        integer :: i
+
+        call stencil_check(st,size(S_table),size(S),"insol_stencil_apply")
+        do i = 1, st%n
+            S(i) = stencil_point_dp(st,i,S_table)
+        end do
+
+    end subroutine stencil_apply_1D_dp
+
+    subroutine stencil_apply_2D_dp(st,S_table,S)
+        ! A table field (n_table) onto 2D targets (n1,n2).
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(dp),                  intent(IN)  :: S_table(:)
+        real(dp),                  intent(OUT) :: S(:,:)
+
+        integer :: i, j
+
+        call stencil_check(st,size(S_table),size(S),"insol_stencil_apply")
+        do j = 1, size(S,2)
+            do i = 1, size(S,1)
+                S(i,j) = stencil_point_dp(st,i+(j-1)*size(S,1),S_table)
+            end do
+        end do
+
+    end subroutine stencil_apply_2D_dp
+
+    subroutine stencil_apply_1Dm_dp(st,S_table,S)
+        ! A table field (n_table,m) onto 1D targets (n,m), m days or months.
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(dp),                  intent(IN)  :: S_table(:,:)
+        real(dp),                  intent(OUT) :: S(:,:)
+
+        integer :: m
+
+        do m = 1, size(S_table,2)
+            call stencil_apply_1D_dp(st,S_table(:,m),S(:,m))
+        end do
+
+    end subroutine stencil_apply_1Dm_dp
+
+    subroutine stencil_apply_2Dm_dp(st,S_table,S)
+        ! A table field (n_table,m) onto 2D targets (n1,n2,m), m days or months.
+
+        implicit none
+
+        type(insol_stencil_class), intent(IN)  :: st
+        real(dp),                  intent(IN)  :: S_table(:,:)
+        real(dp),                  intent(OUT) :: S(:,:,:)
+
+        integer :: m
+
+        do m = 1, size(S_table,2)
+            call stencil_apply_2D_dp(st,S_table(:,m),S(:,:,m))
+        end do
+
+    end subroutine stencil_apply_2Dm_dp
+
+    subroutine lat_to_grid_1D_dp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(dp), intent(IN)  :: S_table(:)
+        real(dp), intent(IN)  :: lats(:)
+        real(dp), intent(OUT) :: S(:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_1D_dp
+
+    subroutine lat_to_grid_2D_dp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(dp), intent(IN)  :: S_table(:)
+        real(dp), intent(IN)  :: lats(:,:)
+        real(dp), intent(OUT) :: S(:,:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_2D_dp
+
+    subroutine lat_to_grid_1Dm_dp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(dp), intent(IN)  :: S_table(:,:)
+        real(dp), intent(IN)  :: lats(:)
+        real(dp), intent(OUT) :: S(:,:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_1Dm_dp
+
+    subroutine lat_to_grid_2Dm_dp(lat_table,S_table,lats,S)
+        ! One-shot: the table field onto the target latitudes (insol_stencil_init + insol_stencil_apply).
+
+        implicit none
+
+        real(dp), intent(IN)  :: lat_table(:)
+        real(dp), intent(IN)  :: S_table(:,:)
+        real(dp), intent(IN)  :: lats(:,:)
+        real(dp), intent(OUT) :: S(:,:,:)
+
+        type(insol_stencil_class) :: st
+
+        call insol_stencil_init(st,lat_table,lats)
+        call insol_stencil_apply(st,S_table,S)
+
+    end subroutine lat_to_grid_2Dm_dp
 
 end module
 

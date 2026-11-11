@@ -2,6 +2,30 @@
 
 Notable changes to `insol`, newest first. Versions are annotated git tags.
 
+## Unreleased
+
+### Fixed
+
+- The time origin of the tables: Laskar et al. (2004) count from J2000, which
+  was read as 1950, so every orbit was that of 50 years later (0.86° of
+  perihelion, 2.3e-5 of eccentricity, 0.0065° of obliquity at present: 1950 is
+  ecc 0.016725, obl 23.4458°, per 102.063°; J2000 ecc 0.016702, obl 23.4393°,
+  per 102.918°).
+  `time_bp` (relative to 1950) now reads the tables at `time_bp - 50` yr.
+  Insolation changes slightly everywhere (the reference values are regenerated
+  with the same correction in `scripts/make_reference.jl`).
+
+### Added
+
+- Latitude profiles onto grids: `insol_stencil_class` with `insol_stencil_init`
+  (table latitudes onto 1D or 2D target latitudes, lon-lat or projected),
+  `insol_stencil_apply` (a profile, with a trailing axis of days or months,
+  single or double precision), `insol_stencil_point` (one target point), and the
+  one-shot `insol_lat_to_grid`. Linear in latitude.
+- `insol_init(..., tables=.false.)`: a state without the orbital tables, for a
+  host that resolves the orbit and passes it as elements (`orbit_pars_class`).
+  No input files are read; a `time_bp` call on it stops with a message.
+
 ## v1.2.0 (2026-10-23)
 
 Additive: fixed orbits. Backwards compatible — `time_bp` calls are unchanged

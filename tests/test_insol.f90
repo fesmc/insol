@@ -62,6 +62,8 @@ program test_insol
     call test_polar_night()
     call test_energy_balance()
     call test_orbit_pars()
+    call test_no_tables()
+    call test_lat_to_grid()
 
     write(*,*)
     write(*,"(a,i0,a,i0,a)") "  ", n_pass, " passed, ", n_fail, " failed"
@@ -785,7 +787,7 @@ contains
 
         integer,  parameter :: nmu  = 200
         integer,  parameter :: nday = 360
-        real(dp), parameter :: ecc_1950 = 0.0167023622549_dp   ! from LA2004 at t=0
+        real(dp), parameter :: ecc_1950 = 0.0167023622549_dp   ! from LA2004 at t=0 (J2000; 1950: 0.016725, within the test's tolerance)
 
         real(dp) :: mu, lats(nmu)
         real(wp) :: insol(nmu)
@@ -937,6 +939,87 @@ contains
     ! ------------------------------------------------------------------
     ! Minimal check framework
     ! ------------------------------------------------------------------
+
+    subroutine test_no_tables()
+        ! A state without the orbital tables (insol_init tables=.false.), given the
+        ! orbit as elements by its host, returns bit-for-bit what a state with the
+        ! tables returns for the same elements: on a latitude grid, for every day.
+
+        implicit none
+
+        type(insol_class)      :: g_tab, g_none
+        type(orbit_pars_class) :: orb
+        real(dp) :: lats(37)
+        real(wp) :: q_tab(37,360), q_none(37,360)
+        integer  :: i
+
+        lats = [(-90.0_dp + 5.0_dp*real(i-1,dp), i = 1, 37)]
+        call insol_init(g_tab, lats,fldr=fldr,S0=S0_ref)
+        call insol_init(g_none,lats,S0=S0_ref,tables=.false.)
+        orb = orbit_pars_at(g_tab,-21e3_dp)
+        call calc_insol_days(g_tab, q_tab, [(i, i = 1, 360)],orb)
+        call calc_insol_days(g_none,q_none,[(i, i = 1, 360)],orb)
+
+        write(*,*)
+        write(*,*) "--- state without tables ---"
+        call check("no tables: the elements give the table state's insolation", &
+                   maxval(abs(real(q_none,dp)-real(q_tab,dp))), 0.0_dp, "max |insol| difference [W/m2]")
+
+        call insol_end(g_tab)
+        call insol_end(g_none)
+
+    end subroutine test_no_tables
+
+    subroutine test_lat_to_grid()
+        ! A profile on 1-degree latitudes mapped onto a 2D grid (insol_lat_to_grid, the stencil): equal to
+        ! the profile at the table latitudes, within the interpolation error of the exact insolation on the
+        ! 2D grid elsewhere; an irregular table; the point form equals the field form.
+
+        implicit none
+
+        integer, parameter :: nx = 13, ny = 7, nt = 181, nd = 360
+        type(insol_class)  :: g1, g2
+        type(insol_stencil_class) :: st
+        type(orbit_pars_class)    :: orb
+        real(dp) :: tab(nt), lats(nx,ny), tirr(5), lirr(4)
+        real(wp) :: P(nt,nd), Q(nx,ny,nd), E(nx,ny,nd), Pt(nt), Pr(5), Qi(4), q1
+        integer  :: i, j, days(nd)
+
+        tab  = [(-90.0_dp + real(i-1,dp), i = 1, nt)]
+        days = [(i, i = 1, nd)]
+        do j = 1, ny
+            do i = 1, nx
+                lats(i,j) = -88.7_dp + 177.0_dp*real((i-1)+(j-1)*nx,dp)/real(nx*ny-1,dp)
+            end do
+        end do
+        call insol_init(g1,tab,S0=S0_ref,tables=.false.)
+        call insol_init(g2,lats,S0=S0_ref,tables=.false.)
+        orb = orbit_pars_at(is,-21e3_dp)
+        call calc_insol_days(g1,P,days,orb)
+        call calc_insol_days(g2,E,days,orb)
+        call insol_lat_to_grid(tab,P,lats,Q)
+
+        write(*,*)
+        write(*,*) "--- latitude profiles onto grids ---"
+        call check("profile onto a 2D grid vs exact (1 degree table)", &
+                   maxval(abs(real(Q,dp)-real(E,dp))), 6.0_dp, "max |insol| difference [W/m2]")
+        call insol_lat_to_grid(tab,P(:,172),tab,Pt)
+        call check("at the table latitudes: the profile itself", maxval(abs(real(Pt,dp)-real(P(:,172),dp))), 0.0_dp, &
+                   "max |insol| difference [W/m2]")
+        tirr = [-90.0_dp, -30.0_dp, 0.0_dp, 10.0_dp, 90.0_dp]
+        Pr   = real([1.0_dp, 2.0_dp, 4.0_dp, 8.0_dp, 16.0_dp],wp)
+        lirr = [-60.0_dp, 0.0_dp, 5.0_dp, 50.0_dp]
+        call insol_lat_to_grid(tirr,Pr,lirr,Qi)
+        call check("irregular table: linear in latitude", &
+                   maxval(abs(real(Qi,dp)-[1.5_dp, 4.0_dp, 6.0_dp, 12.0_dp])), 1.0e-12_dp, "max |difference|")
+        call insol_stencil_init(st,tab,lats)
+        q1 = insol_stencil_point(st,nx+2,P(:,100))
+        call check("point form = field form", abs(real(q1,dp)-real(Q(2,2,100),dp)), 0.0_dp, "|difference|")
+
+        call insol_end(g1)
+        call insol_end(g2)
+
+    end subroutine test_lat_to_grid
 
     subroutine check(name, value, tol, what)
         ! Pass if value <= tol.
