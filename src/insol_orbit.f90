@@ -551,8 +551,8 @@ contains
     function orbit_pars_fixed(ecc,obl,per) result(orbit)
         ! Given orbital elements, for a fixed orbit (eg. a control climate).
         ! `per` is the longitude of perihelion in the convention of the tables
-        ! (Berger 1978; see calc_perihelion): 102.92 degrees at J2000 (102.06 in 1950), with
-        ! ecc = 0.01670 and obl = 23.439 degrees.
+        ! (Berger 1978; see calc_perihelion): 102.063 degrees in 1950, with ecc = 0.016725
+        ! and obl = 23.4458 degrees (J2000: 102.918, 0.016702, 23.4393).
 
         implicit none
 
