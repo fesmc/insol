@@ -2,6 +2,14 @@
 
 Notable changes to `insol`, newest first. Versions are annotated git tags.
 
+## Unreleased
+
+### Added
+
+- `insol_init(..., tables=.false.)`: a state without the orbital tables, for a
+  host that resolves the orbit and passes it as elements (`orbit_pars_class`).
+  No input files are read; a `time_bp` call on it stops with a message.
+
 ## v1.2.0 (2026-10-23)
 
 Additive: fixed orbits. Backwards compatible — `time_bp` calls are unchanged

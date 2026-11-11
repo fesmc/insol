@@ -153,6 +153,20 @@ as the tables give it (102.92° in 1950). The elements carry no calendar; the
 time of perihelion is derived with the `day_year` of the state they are used
 with.
 
+### A state without tables
+
+A model that is given the orbit by its host (a coupler that resolves the orbit
+once, for every component) needs the latitude geometry and the calendar but not
+the tables:
+
+```fortran
+call insol_init(is,lats,day_year=365,tables=.false.)   ! no input files read
+call calc_insol_days(is,insol,days,orbit)              ! orbit from the host
+```
+
+Such a state takes the orbit only as elements; a `time_bp` call stops with a
+message (`orbit_pars_at` needs the tables).
+
 ### Mean cosine convention
 
 `coszm` — from `calc_insol_day`, `calc_insol_diurnal` or the elevation-threshold

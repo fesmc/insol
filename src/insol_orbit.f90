@@ -40,7 +40,7 @@ module insol_orbit
 
     type orbit_class
         ! Orbital element table, loaded once by orbit_init and read-only after.
-        integer :: n_orbit
+        integer :: n_orbit = 0
         real(dp), allocatable :: time(:)     ! [ka] relative to 1950
         real(dp), allocatable :: eccm(:)     ! Eccentricity
         real(dp), allocatable :: xobm(:)     ! Obliquity [degrees]
@@ -89,21 +89,33 @@ module insol_orbit
 
 contains
 
-    subroutine orbit_init(orb,fldr,day_year)
-        ! Load the orbital tables and fix the calendar.
+    subroutine orbit_init(orb,fldr,day_year,tables)
+        ! Fix the calendar and load the orbital tables. tables = .false.: no
+        ! tables, for a state that is given the orbit as elements by its host
+        ! (orbit_pars_class); a time then stops (orbit_pars_at).
 
         implicit none
 
         type(orbit_class), intent(INOUT) :: orb
         character(len=*),  intent(IN), optional :: fldr
         integer,           intent(IN), optional :: day_year
+        logical,           intent(IN), optional :: tables
+
+        logical :: load
 
         orb%day_year = 360
         if (present(day_year)) orb%day_year = day_year
 
         call check_day_year(orb%day_year)
 
-        call load_orbital_table(orb,fldr)
+        load = .true.
+        if (present(tables)) load = tables
+        if (load) then
+            call load_orbital_table(orb,fldr)
+        else
+            call orbit_end(orb)
+            orb%n_orbit = 0
+        end if
 
         return
 
@@ -479,6 +491,13 @@ contains
         integer  :: N1, N2, NMID
         real(dp) :: time_ka, ef
         real(dp) :: perm1, perm2
+
+        if (orb%n_orbit .eq. 0) then
+            write(*,*) "orbit_pars_at:: Error: the state holds no orbital tables"
+            write(*,*) "(insol_init with tables=.false.): pass the orbit as elements"
+            write(*,*) "(orbit_pars_class) instead of a time. time_bp [yr]: ", time_bp
+            error stop 1
+        end if
 
         ! Get current time in ka
         time_ka = time_bp*1d-3

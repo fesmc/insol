@@ -62,6 +62,7 @@ program test_insol
     call test_polar_night()
     call test_energy_balance()
     call test_orbit_pars()
+    call test_no_tables()
 
     write(*,*)
     write(*,"(a,i0,a,i0,a)") "  ", n_pass, " passed, ", n_fail, " failed"
@@ -937,6 +938,36 @@ contains
     ! ------------------------------------------------------------------
     ! Minimal check framework
     ! ------------------------------------------------------------------
+
+    subroutine test_no_tables()
+        ! A state without the orbital tables (insol_init tables=.false.), given the
+        ! orbit as elements by its host, returns bit-for-bit what a state with the
+        ! tables returns for the same elements: on a latitude grid, for every day.
+
+        implicit none
+
+        type(insol_class)      :: g_tab, g_none
+        type(orbit_pars_class) :: orb
+        real(dp) :: lats(37)
+        real(wp) :: q_tab(37,360), q_none(37,360)
+        integer  :: i
+
+        lats = [(-90.0_dp + 5.0_dp*real(i-1,dp), i = 1, 37)]
+        call insol_init(g_tab, lats,fldr=fldr,S0=S0_ref)
+        call insol_init(g_none,lats,S0=S0_ref,tables=.false.)
+        orb = orbit_pars_at(g_tab,-21e3_dp)
+        call calc_insol_days(g_tab, q_tab, [(i, i = 1, 360)],orb)
+        call calc_insol_days(g_none,q_none,[(i, i = 1, 360)],orb)
+
+        write(*,*)
+        write(*,*) "--- state without tables ---"
+        call check("no tables: the elements give the table state's insolation", &
+                   maxval(abs(real(q_none,dp)-real(q_tab,dp))), 0.0_dp, "max |insol| difference [W/m2]")
+
+        call insol_end(g_tab)
+        call insol_end(g_none)
+
+    end subroutine test_no_tables
 
     subroutine check(name, value, tol, what)
         ! Pass if value <= tol.

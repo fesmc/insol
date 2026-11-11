@@ -159,9 +159,10 @@ contains
 ! =====================================================================================================
 ! Initialization
 
-    subroutine insol_init_nogrid(is,fldr,S0,day_year,coszm_kind)
+    subroutine insol_init_nogrid(is,fldr,S0,day_year,coszm_kind,tables)
         ! Load the orbital tables without a latitude grid. The resulting state
-        ! supports point queries only.
+        ! supports point queries only. tables = .false.: no tables either; the
+        ! state then takes the orbit only as elements (orbit_pars_class).
 
         implicit none
 
@@ -170,8 +171,9 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
-        call insol_config(is,fldr,S0,day_year,coszm_kind)
+        call insol_config(is,fldr,S0,day_year,coszm_kind,tables)
 
         is%grid  = .FALSE.
         is%n_lat = 0
@@ -182,8 +184,10 @@ contains
 
     end subroutine insol_init_nogrid
 
-    subroutine insol_init_1D(is,lats,fldr,S0,day_year,coszm_kind)
-        ! Load the orbital tables and precompute the geometry of a 1D latitude grid.
+    subroutine insol_init_1D(is,lats,fldr,S0,day_year,coszm_kind,tables)
+        ! Load the orbital tables (unless tables = .false.: the state then takes
+        ! the orbit only as elements) and precompute the geometry of a 1D
+        ! latitude grid.
 
         implicit none
 
@@ -193,16 +197,19 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
-        call insol_config(is,fldr,S0,day_year,coszm_kind)
+        call insol_config(is,fldr,S0,day_year,coszm_kind,tables)
         call insol_set_grid(is,reshape(lats,[size(lats)]),size(lats),0)
 
         return
 
     end subroutine insol_init_1D
 
-    subroutine insol_init_2D(is,lats,fldr,S0,day_year,coszm_kind)
-        ! Load the orbital tables and precompute the geometry of a 2D latitude grid.
+    subroutine insol_init_2D(is,lats,fldr,S0,day_year,coszm_kind,tables)
+        ! Load the orbital tables (unless tables = .false.: the state then takes
+        ! the orbit only as elements) and precompute the geometry of a 2D
+        ! latitude grid.
 
         implicit none
 
@@ -212,8 +219,9 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
-        call insol_config(is,fldr,S0,day_year,coszm_kind)
+        call insol_config(is,fldr,S0,day_year,coszm_kind,tables)
         call insol_set_grid(is,reshape(lats,[size(lats)]),size(lats,1),size(lats,2))
 
         return
@@ -1274,10 +1282,10 @@ contains
 ! =====================================================================================================
 ! Internal helpers
 
-    subroutine insol_config(is,fldr,S0,day_year,coszm_kind)
-        ! Apply configuration defaults and load the orbital tables. The mean
-        ! cosine convention is resolved from its string once, here, so the hot
-        ! path stores only the integer code.
+    subroutine insol_config(is,fldr,S0,day_year,coszm_kind,tables)
+        ! Apply configuration defaults and load the orbital tables (unless
+        ! tables = .false.). The mean cosine convention is resolved from its
+        ! string once, here, so the hot path stores only the integer code.
 
         implicit none
 
@@ -1286,6 +1294,7 @@ contains
         real(dp),          intent(IN), optional :: S0
         integer,           intent(IN), optional :: day_year
         character(len=*),  intent(IN), optional :: coszm_kind
+        logical,           intent(IN), optional :: tables
 
         is%S0 = S0_default
         if (present(S0)) is%S0 = S0
@@ -1293,7 +1302,7 @@ contains
         is%coszm_kind = COSZM_KIND_FLUX
         if (present(coszm_kind)) is%coszm_kind = resolve_coszm_kind(coszm_kind)
 
-        call orbit_init(is%orb,fldr,day_year)
+        call orbit_init(is%orb,fldr,day_year,tables)
 
         return
 
