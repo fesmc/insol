@@ -2,7 +2,7 @@
 
 Notable changes to `insol`, newest first. Versions are annotated git tags.
 
-## Unreleased
+## v1.3.0 (2026-11-11)
 
 ### Fixed
 
