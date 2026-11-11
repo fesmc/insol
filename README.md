@@ -167,6 +167,28 @@ call calc_insol_days(is,insol,days,orbit)              ! orbit from the host
 Such a state takes the orbit only as elements; a `time_bp` call stops with a
 message (`orbit_pars_at` needs the tables).
 
+### Latitude profiles onto grids
+
+TOA insolation depends on latitude only, so a model can compute it once on a
+latitude table (a 1D state, e.g. 1° or 0.1°) and map that profile onto any grid,
+lon-lat or projected:
+
+```fortran
+call insol_lat_to_grid(lat_table,S_table,lat2D,S)   ! S_table(n_lat[,m]) -> S(nx,ny[,m])
+
+type(insol_stencil_class) :: st                       ! the same, the weights kept
+call insol_stencil_init(st,lat_table,lat2D)           ! once
+call insol_stencil_apply(st,S_table,S)                ! every time the profile changes
+S_k = insol_stencil_point(st,k,S_table)               ! one target point (flat index)
+```
+
+The interpolation is linear in latitude; on a regular table it is
+`x = (lat - lat_table(1))/dlat`, `j0 = int(x) + 1`, `w1 = x - (j0 - 1)`, and
+targets beyond the table take its ends. A trailing axis (days, months) is kept.
+On a 1° table the profile differs from the exact insolation on the grid by a few
+W/m2 at most, near the edges of the polar night; for an exact field, initialise
+the state with the grid's latitudes instead (`insol_init(is,lat2D)`).
+
 ### Mean cosine convention
 
 `coszm` — from `calc_insol_day`, `calc_insol_diurnal` or the elevation-threshold

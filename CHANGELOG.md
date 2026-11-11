@@ -17,6 +17,11 @@ Notable changes to `insol`, newest first. Versions are annotated git tags.
 
 ### Added
 
+- Latitude profiles onto grids: `insol_stencil_class` with `insol_stencil_init`
+  (table latitudes onto 1D or 2D target latitudes, lon-lat or projected),
+  `insol_stencil_apply` (a profile, with a trailing axis of days or months,
+  single or double precision), `insol_stencil_point` (one target point), and the
+  one-shot `insol_lat_to_grid`. Linear in latitude.
 - `insol_init(..., tables=.false.)`: a state without the orbital tables, for a
   host that resolves the orbit and passes it as elements (`orbit_pars_class`).
   No input files are read; a `time_bp` call on it stops with a message.
